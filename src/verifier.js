@@ -11,6 +11,7 @@ const {
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
+  HUB_ZH_TABLE_FEATURE_MARKERS,
   EXTENSION_HOOK_MARKER,
   isAgyPackageLocalized,
   isWorkbenchPatched,
@@ -22,7 +23,7 @@ const {
 
 function runVerify() {
   console.log('====================================================');
-  console.log('  Antigravity IDE 汉化生效与防损坏综合自检系统');
+  console.log('  Antigravity IDE 汉化与使用优化综合自检系统');
   console.log('====================================================\n');
 
   const patchDir = path.resolve(__dirname, '..');
@@ -188,6 +189,13 @@ function runVerify() {
       'Hub 前端思维链实时流式翻译、直出门控、防打断悬停与小锁锁定就绪',
       missingThoughtMarkers.length === 0,
       missingThoughtMarkers.length === 0 ? `(${HUB_ZH_THOUGHT_FEATURE_MARKERS.length}/${HUB_ZH_THOUGHT_FEATURE_MARKERS.length})` : `(缺失: ${missingThoughtMarkers.join(', ')})`
+    );
+
+    const missingTableMarkers = HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !zhContent.includes(m));
+    assert(
+      'Hub 前端 Markdown 表格智能权重自适应布局与菜单汉化就绪',
+      missingTableMarkers.length === 0,
+      missingTableMarkers.length === 0 ? `(${HUB_ZH_TABLE_FEATURE_MARKERS.length}/${HUB_ZH_TABLE_FEATURE_MARKERS.length})` : `(缺失: ${missingTableMarkers.join(', ')})`
     );
   }
 

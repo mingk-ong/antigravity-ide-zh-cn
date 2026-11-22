@@ -61,6 +61,18 @@ const HUB_ZH_TITLE_FEATURE_MARKERS = [
   '/translate-title'
 ];
 
+const HUB_ZH_TABLE_FEATURE_MARKERS = [
+  '__agyTableEngine',
+  'computeColumnWidths',
+  'buildTableCss',
+  'data-agy-measuring',
+  'data-agy-table-responsive',
+  '展开全宽',
+  '适应窗口',
+  '复制为 Markdown',
+  '表格选项'
+];
+
 const EXTENSION_HOOK_MARKER = 'redirectIframeUrl';
 const EXTENSION_HOOK_TARGET = 'renderWebviewHtml(a,b,c,d){Jv(a);';
 const EXTENSION_HOOK_REPLACEMENT =
@@ -595,6 +607,7 @@ module.exports = {
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
+  HUB_ZH_TABLE_FEATURE_MARKERS,
   EXTENSION_HOOK_MARKER,
   EXTENSION_HOOK_TARGET,
   WORKBENCH_YHN_TARGET,

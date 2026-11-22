@@ -449,13 +449,13 @@ async function runTests() {
     // ---------------------------------------------------------------------
     console.log('\n【第五组】更新适配探针、熔断保护与跨版本安全备份验证');
 
-    await test('更新适配探针 18 项必选核心锚点与外围增强锚点全量命中 + 内部耦合符号改名熔断校验', async () => {
+    await test('更新适配探针 23 项必选核心锚点与外围增强锚点全量命中 + 内部耦合符号改名熔断校验', async () => {
       const { probeVersionCompatibility } = require(path.join(SRC_DIR, 'auto_updater.js'));
       const { resolveHubSourcePath } = require(path.join(SRC_DIR, 'core_injector.js'));
       const hubSourcePath = resolveHubSourcePath(agyExtDir, PATCH_DIR);
       const probeOk = probeVersionCompatibility(hubSourcePath);
       assert.strictEqual(probeOk.compatible, true, `当前官方版本应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
-      assert.strictEqual(probeOk.matchedAnchors.length, 18, `应命中全部 18 项必选核心锚点，实际=${probeOk.matchedAnchors.length}`);
+      assert.strictEqual(probeOk.matchedAnchors.length, 23, `应命中全部 23 项必选核心锚点，实际=${probeOk.matchedAnchors.length}`);
       assert.ok(probeOk.optionalAnchors.length >= 3 && probeOk.optionalAnchors.every(a => a.matched), '外围 workbench/jetskiAgent 锚点应全部兼容');
 
       // 模拟新版 Google 更改了 iAc 内部耦合混淆名 n2 -> z9，必须触发安全熔断拒绝注入

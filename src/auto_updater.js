@@ -4,7 +4,7 @@
  * 核心特性：
  * 1. 深度多维健康检查：覆盖 7 大维度（扩展钩子、代理与双翻译微服务模板一致性、hub_main_zh.js 完整特性指纹、
  *    官方 hub_main.js 与构建引擎哈希漂移、外层 workbench/jetskiAgent/package.json 注入态、元数据与 product.json 全量签名）
- * 2. 分层特征指纹兼容探针：18 项主引擎必选核心锚点（含 iAc 内部耦合符号组与 extension.js）+ 外围增强锚点分级评估
+ * 2. 分层特征指纹兼容探针：23 项主引擎必选核心锚点（含 iAc/lkc/mkc 内部耦合符号组与 extension.js）+ 外围增强锚点分级评估
  * 3. 统一无损自愈流水线：直接复用 core_injector.applyAllPatches，与手动 patcher.js 100% 同步无漏项，内置跨版本 .bak 防污染保护
  * 4. 零破坏安全防御：遇到不兼容版本坚决熔断，保持官方原版启动并输出详尽诊断报告
  * 5. 智能日志生命周期管理：仅保留最近 2 次完整运行记录，单次超 500KB 自动体积兜底裁剪
@@ -27,6 +27,7 @@ const {
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
+  HUB_ZH_TABLE_FEATURE_MARKERS,
   EXTENSION_HOOK_MARKER,
   EXTENSION_HOOK_TARGET,
   WORKBENCH_YHN_TARGET,
@@ -249,6 +250,8 @@ function inspectHealthDeeply() {
     const hasTitleEngine = HUB_ZH_TITLE_FEATURE_MARKERS.every(m => content.includes(m));
     const missingThoughtFeatures = HUB_ZH_THOUGHT_FEATURE_MARKERS.filter(m => !content.includes(m));
     const hasThoughtEngine = missingThoughtFeatures.length === 0;
+    const missingTableFeatures = HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !content.includes(m));
+    const hasTableEngine = missingTableFeatures.length === 0;
 
     // 检查版本漂移：官方 IDE 版本/distro、hub_main.js 源或本地构建引擎是否已变更
     const hubSourcePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
@@ -265,7 +268,7 @@ function inspectHealthDeeply() {
     const hubMetaMissingHash = Boolean(!meta || !meta.hubSourceSha256 || !meta.buildEngineSha256 || (curDistro && !meta.distro));
     const noDrift = !appIdentityDrifted && !hubSourceDrifted && !buildEngineDrifted && !hubMetaMissingHash;
 
-    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine && noDrift;
+    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine && hasTableEngine && noDrift;
 
     report.details.zhBundle = {
       path: ZH_MAIN_JS,
@@ -278,6 +281,7 @@ function inspectHealthDeeply() {
         xT_设置卡片行: hasXt ? '✔ 注入正常' : '❌ 缺失',
         XB_会话标题枢纽: hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
         iAc_思维链流式翻译: hasThoughtEngine ? '✔ 直出门控/悬停防打断/小锁全就绪' : `❌ 缺失 (${missingThoughtFeatures.slice(0, 3).join(', ')})`,
+        lkc_表格自适应布局: hasTableEngine ? '✔ 智能权重列宽/防遮挡/菜单汉化就绪' : `❌ 缺失 (${missingTableFeatures.slice(0, 3).join(', ')})`,
         DOM_运行时清洗器: hasDomCleaner ? '✔ 挂载正常' : '❌ 缺失'
       },
       driftStatus: appIdentityDrifted
@@ -298,6 +302,10 @@ function inspectHealthDeeply() {
     if (!hasThoughtEngine) {
       report.valid = false;
       report.failures.push(`hub_main_zh.js 思维链特性版本过旧，缺少: ${missingThoughtFeatures.join(', ')}`);
+    }
+    if (!hasTableEngine) {
+      report.valid = false;
+      report.failures.push(`hub_main_zh.js Markdown 表格自适应布局特性缺失: ${missingTableFeatures.join(', ')}`);
     }
     if (appIdentityDrifted) {
       report.valid = false;
@@ -412,7 +420,7 @@ function inspectHealthDeeply() {
 
 /**
  * 阶段二：分层新版本特征指纹兼容性探针
- * - 必选核心锚点（18 项，含 hub_main.js 17 项 + extension.js 1 项）：任一缺失即坚决熔断保护，防止白屏
+ * - 必选核心锚点（23 项，含 hub_main.js 22 项 + extension.js 1 项）：任一缺失即坚决熔断保护，防止白屏
  * - 外围增强锚点（workbench / jetskiAgent）：分级记录诊断，不阻断主引擎自愈
  */
 function probeVersionCompatibility(targetHubMainPath, opts = {}) {
@@ -523,6 +531,24 @@ function probeVersionCompatibility(targetHubMainPath, opts = {}) {
       name: '思维链渲染组件起点 (iAc)',
       pattern: 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{',
       desc: '负责渲染 Thought for 折叠面板及流式思维链实时翻译、防打断悬停与小锁交互'
+    },
+    {
+      id: 'ckc_table_measure',
+      name: 'Markdown 表格列宽测量函数 (ckc)',
+      pattern: 'function ckc(a){var b=a.querySelector(":scope > table");',
+      desc: '负责测量 Markdown 表格各列自然宽度与边框内边距'
+    },
+    {
+      id: 'lkc_table_start',
+      name: 'Markdown 表格主渲染组件起点 (lkc)',
+      pattern: 'function lkc({node:a,staggerStyle:b,...c}){',
+      desc: '负责 Markdown 表格自适应布局与窗口尺寸追踪'
+    },
+    {
+      id: 'mkc_table_menu',
+      name: 'Markdown 表格操作菜单组件 (mkc)',
+      pattern: 'function mkc({widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d}){',
+      desc: '负责表格右上角复制与展开全宽/适应窗口切换菜单'
     }
   ];
 
@@ -579,7 +605,55 @@ function probeVersionCompatibility(targetHubMainPath, opts = {}) {
     missingAnchors.push(coupledAnchor);
   }
 
-  // 必选锚点 18：extension.js Webview 代理注入点（已挂钩或原生锚点命中）
+  // 必选锚点 21：表格组件定界终点 (var nkc= 必须在 mkc 起点之后)
+  const mkcStartAnchor = matchedAnchors.find(a => a.id === 'mkc_table_menu');
+  const lkcStartAnchor = matchedAnchors.find(a => a.id === 'lkc_table_start');
+  const mkcStartIdx = mkcStartAnchor ? mkcStartAnchor.offset : -1;
+  const lkcStartIdx = lkcStartAnchor ? lkcStartAnchor.offset : -1;
+  const nkcEndIdx = mkcStartIdx !== -1 ? code.indexOf('var nkc=({src:a,alt:b,originalFilePath:c', mkcStartIdx) : -1;
+  const nkcEndAnchor = {
+    id: 'nkc_table_end',
+    name: 'Markdown 表格组件定界终点 (var nkc=)',
+    pattern: 'var nkc=({src:a,alt:b,originalFilePath:c'
+  };
+  if (nkcEndIdx !== -1) {
+    matchedAnchors.push({ ...nkcEndAnchor, offset: nkcEndIdx });
+  } else {
+    missingAnchors.push(nkcEndAnchor);
+  }
+
+  // 必选锚点 22：表格组件强耦合符号组 + 文件胶囊最小宽 CSS 锚点
+  const tableCoupledSymbols = [
+    'Wi(',
+    'ckc(',
+    'ekc(',
+    'fkc(',
+    'ikc(',
+    'kkc(',
+    'kY()',
+    'D.createElement(WW',
+    'D.createElement(XW',
+    'D.createElement(YW',
+    'D.createElement(ZW',
+    'D.createElement(gH',
+    'D.createElement(Aw'
+  ];
+  const tableBody = lkcStartIdx !== -1 && nkcEndIdx !== -1 ? code.slice(lkcStartIdx, nkcEndIdx) : '';
+  const missingTableCoupled = tableBody ? tableCoupledSymbols.filter(sym => !tableBody.includes(sym)) : tableCoupledSymbols;
+  const hasPillCss = code.includes('min-width: calc-size(max-content, min(size, 20ch));');
+  if (!hasPillCss) missingTableCoupled.push('.inline-pill-wrap(20ch)');
+  const tableCoupledAnchor = {
+    id: 'table_coupled_symbols',
+    name: 'Markdown 表格强耦合符号组与胶囊 CSS 锚点 (Wi/fkc/ikc/kkc/kY/WW-ZW/gH/Aw)',
+    pattern: missingTableCoupled.length > 0 ? `缺失符号: ${missingTableCoupled.join(', ')}` : tableCoupledSymbols.join(', ')
+  };
+  if (missingTableCoupled.length === 0) {
+    matchedAnchors.push({ ...tableCoupledAnchor, offset: lkcStartIdx });
+  } else {
+    missingAnchors.push(tableCoupledAnchor);
+  }
+
+  // 必选锚点 23：extension.js Webview 代理注入点（已挂钩或原生锚点命中）
   const extAnchor = {
     id: 'ext_renderWebviewHtml',
     name: '扩展 Webview 渲染钩子入口 (extension.js)',
@@ -731,7 +805,7 @@ function main() {
   if (health.details.zhBundle && health.details.zhBundle.ok) {
     appendLog(`  ✔ 汉化资产 (hub_main_zh.js) : 完整 [大小: ${health.details.zhBundle.size}, 版本校验: ${health.details.zhBundle.driftStatus}]`);
     const eng = health.details.zhBundle.engines;
-    appendLog(`     └─► 引擎指纹核验: sT配置工厂(${eng.sT_元数据工厂}) | uT大标题(${eng.uT_顶层标题卡片}) | yT分区(${eng.yT_分区折叠面板}) | xT设置行(${eng.xT_设置卡片行}) | XB标题枢纽(${eng.XB_会话标题枢纽}) | iAc思维链(${eng.iAc_思维链流式翻译}) | DOM清洗(${eng.DOM_运行时清洗器})`);
+    appendLog(`     └─► 引擎指纹核验: sT配置工厂(${eng.sT_元数据工厂}) | uT大标题(${eng.uT_顶层标题卡片}) | yT分区(${eng.yT_分区折叠面板}) | xT设置行(${eng.xT_设置卡片行}) | XB标题枢纽(${eng.XB_会话标题枢纽}) | iAc思维链(${eng.iAc_思维链流式翻译}) | lkc表格自适应(${eng.lkc_表格自适应布局}) | DOM清洗(${eng.DOM_运行时清洗器})`);
   } else {
     appendLog(`  ❌ 汉化资产 (hub_main_zh.js) : 异常 [${health.details.zhBundle?.error || health.details.zhBundle?.driftStatus || '组件指纹不完整'}]`);
   }

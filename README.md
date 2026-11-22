@@ -1,35 +1,50 @@
-# Antigravity IDE 深度全量汉化与防损坏补丁工具包
+# Antigravity IDE（反重力）深度全量汉化与使用体验优化工具包
 
-本工具包专为 **Google Antigravity IDE (基于 VS Code 内核 v1.107.0)** 深度定制开发，彻底解决版本更新后汉化失效、设置界面英文残留以及修改内核后引发的“安装似乎损坏”系统警告问题。
+本工具包专为 **Google Antigravity IDE（基于 VS Code 内核）** 深度定制，提供 **「深度全量汉化」** 与 **「使用体验优化」** 两大核心能力，并内置跨版本安全自愈与防“安装似乎损坏”校验机制。
 
 ---
 
-## 🌟 核心特性与架构亮点
+## 一、深度全量汉化能力
 
-1. **三大核心 JavaScript 文件全面覆盖**：
-   - **`resources/app/out/main.js`**：Electron 实际主入口，负责渲染设置编辑器、主输入框、会话右键菜单（真正解决界面英文残留的根本）；
-   - **`resources/app/out/vs/workbench/workbench.desktop.main.js`**：VS Code 工作区底层核心；
-   - **`resources/app/out/jetskiAgent/main.js`**：独立智能体弹窗界面；
-   - **`resources/app/extensions/agy/package.json`**：扩展命令与视图容器配置。
-2. **展示层拦截机制（零副作用）**：
-   - 采用 `a0e(e)`、`tct(t)`、`SY` 与 `PUe` 导航拦截，只将显示的 Label 翻译为中文，保留原始路由 key（`display: e === "General"`），杜绝右侧面板空白或失效。
-3. **会话标题（Conversations）实时自动翻译与原生 RPC 持久化中文化**：
-   - 深入拦截侧边栏真实运行载体 `hub_main_zh.js` 中的 `XB(a)` 命门函数及 4 处绕过渲染点，并在根组件 `vcc` 注入 Redux 实时订阅守卫；
-   - 联动本地 `14588` 代理提供 `/translate-title` 多源翻译微服务（微软必应 → 彩云小译 → 腾讯 TranSmart → 本地离线兜底），新对话生成英文标题后 1~2 秒内自动调用官方原生 `updateConversationAnnotations` RPC 永久回写本地数据库；
-   - 同步联动外层 `workbench.desktop.main.js`（`yhn`）与 `jetskiAgent/main.js`（`est`/`uEn`/`sMa`）；
-   - 具备全链路实时追踪日志系统，默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义目录，**所有运行日志默认仅保留最近 2 次完整记录**）；
-   - 详细排查历程见专题白皮书：[会话标题中文化与全链路故障排查白皮书](docs/CONVERSATION_TITLE_LOCALIZATION.md)。
-4. **思维链（`Thought for`）实时流式翻译与 JSONL 分层缓存（v1.3.0 新增）**：
-   - 静态汉化 `Thought for Xs` → `思考了 X 秒`、`Thinking for Xs` → `已思考 X 秒`、`Thought Process` → `思考过程`、`Thinking...` → `正在思考...`（同步覆盖 Hub 与 `jetskiAgent`）；
-   - 前端 `iAc` 组件内置等长掩码安全断句器（规避文件名/版本号/缩写句点陷阱并保留 `\n\n\n` 段落结构），采用 **译文门控（未译英文绝不上屏，首波展示柔和中文占位）+ 首波 0ms 零防抖与句末标点即时锁定 + 短链译完停留 1.5s（3.5s 断网硬兜底）+ 整块悬停锁定（跨后续步骤重挂载与页面滚动推高绝不打断展开，鼠标主动移出区域 350ms 自动收起）+ 右上角小锁常驻展开开关与「查看原文 / 查看译文」一键切换**；
-   - 代理微服务 `thought_translator.js` 新增 `POST /translate-thought`、`GET /thought-cache-stats`、`POST /thought-cache-clear` 路由：启用 HTTP/HTTPS Keep-Alive 连接池，优先腾讯 TranSmart 原生批量通道（连续流式 ~200–300ms），动态零冲突锚点隔离行内代码/URL/路径并防 GFM 波浪号删除线误渲染；支持通过 `AGY_ZH_THOUGHT_LLM_URL` 接入本地 Ollama 或 OpenAI 兼容轻量 LLM；
-   - 缓存采用纯本地 Append-Only JSONL（默认 `%LOCALAPPDATA%\antigravity-zh-cn\cache\thought_cache.jsonl`，支持 `AGY_ZH_CACHE_DIR` 覆盖，自动避开 OneDrive），具备 **500ms 写合并、读命中 0 刷盘、崩溃残行容错、30 天按访问续命 TTL / 15,000 条 / 6 MB 惰性原子压缩与质量权重分级覆盖**。
-5. **SHA-256 校验和全量自愈同步（杜绝损坏警告）**：
-   - 自动按照 VS Code 内核规范计算新文件的 Base64 校验和，同步写回 `product.json`，完美通过内核自检。
-6. **V8 字节码与缓存自动清理**：
-   - 每次打补丁时自动安全清理 `%APPDATA%\Antigravity IDE\CachedData` 下的历史字节码缓存，彻底防止 Electron 加载旧代码。
-7. **全方位检验与审计日志**：
-   - 内置自动化验证套件：`run-verify.bat`（`src/verifier.js` 全链路生效与零漂移综合审查）、`verify_all_14_screens.js`（53 项设置页验收）、`verify_title_localization.js`（15 项标题自动化验收）与 `verify_thought_localization.js`（15 项思维链流式、JSONL 缓存、18 项更新适配探针、跨版本安全备份与日志保留验收）。
+### 1. 全界面与设置中心深度中文化（零副作用展示层拦截）
+- **Hub 前端核心（`hub_main_zh.js`）**：通过 `sT`、`uT`、`yT`、`xT`、`vT` 展示层拦截加全局运行时 DOM 清洗双层防线，全量覆盖 14 个设置屏幕、48+ 分区面板、主对话输入框、会话右键菜单、Token 用量明细及各类操作按钮；严格保留原始路由 Key，绝不引发页面空白或配置失效。
+- **外层工作台与扩展层**：联动汉化 `extensions/agy/package.json` 扩展命令标题、`out/vs/workbench/workbench.desktop.main.js`（`yhn`）与 `out/jetskiAgent/main.js`（`est` / `uEn` / `sMa` 及思考耗时标签）。
+- **Markdown 表格菜单汉化**：同步汉化对话表格右上角操作菜单与提示（`表格选项`、`复制为 Markdown`、`展开全宽`、`适应窗口`、`已复制到剪贴板`、`可横向滚动表格`）。
+
+### 2. 会话标题（Conversations）实时翻译与原生 RPC 持久化
+- 深入拦截侧边栏真实运行载体 `hub_main_zh.js` 的 `XB(a)` 核心枢纽及 4 处绕过点，并在根组件 `vcc` 注入 Redux 实时订阅守卫；
+- 联动本地固定端口 `14588` 透明代理提供 `/translate-title` 多源翻译微服务（微软必应 → 彩云小译 → 腾讯 TranSmart → 本地离线兜底），新对话生成英文标题后 1~2 秒内自动调用官方原生 `updateConversationAnnotations` RPC 永久回写本地数据库；
+- 详细故障排查与原理解析见：[会话标题中文化与全链路故障排查白皮书](docs/CONVERSATION_TITLE_LOCALIZATION.md)。
+
+### 3. 思维链（`Thought for`）实时流式翻译与 JSONL 分层缓存
+- **头部文案汉化**：静态汉化 `Thought for Xs` → `思考了 X 秒`、`Thinking for Xs` → `已思考 X 秒`、`Thought Process` → `思考过程`、`Thinking...` → `正在思考...`（同步覆盖 Hub 与 `jetskiAgent`）。
+- **安全断句与代码无损隔离**：前端 `iAc` 组件内置等长掩码安全断句器（规避文件名/版本号/缩写句点陷阱并保留 `\n\n\n` 段落结构）；后端 `thought_translator.js` 通过动态零冲突锚点隔离行内代码、URL 与文件路径，并自动防 GFM 波浪号删除线误渲染。
+- **高速批量流式通道**：代理提供 `POST /translate-thought`、`GET /thought-cache-stats`、`POST /thought-cache-clear`，启用 HTTP/HTTPS Keep-Alive 连接池，优先腾讯 TranSmart 批量通道（连续流式 ~200–300ms），支持通过 `AGY_ZH_THOUGHT_LLM_URL` 接入本地 Ollama 或 OpenAI 兼容轻量 LLM。
+- **纯本地 Append-Only JSONL 缓存**：默认存放在 `%LOCALAPPDATA%\antigravity-zh-cn\cache\thought_cache.jsonl`（支持 `AGY_ZH_CACHE_DIR` 覆盖，自动避开 OneDrive 文件锁），具备 500ms 写合并、读命中 0 刷盘、崩溃残行容错、30 天按访问续命 TTL / 15,000 条 / 6 MB 惰性原子压缩与质量权重分级覆盖。
+
+---
+
+## 二、使用体验与交互优化
+
+### 1. 思维链点击与展开交互优化（`iAc` + `__agyThoughtEngine`）
+针对官方思维链“刚想看就自动折叠、后续步骤推高滚动条打断阅读、中英文切换闪烁”等痛点进行深度体验重构：
+- **点击展开防打断与悬停锁定**：点击展开或鼠标悬停在思考块任意区域（`data-agy-thought-wrap`）时，自动进入悬停锁定态；即便后续步骤到来引发组件卸载重挂载或页面自动滚动推高布局，依靠跨重挂载 UI 状态表（`getStepUiState`）与全局指针移动检测（`getLastPointer` 免疫 >220ms 假性 `mouseleave`），**绝不中途打断展开**；待鼠标真正主动移出思考块区域后延迟 **350ms** 平滑自动收起。
+- **右上角「展开锁定」小锁按钮**：支持一键点击上锁（`thought-collapse-lock`，琥珀色高亮），上锁后停用鼠标离开自动折叠，可安心对照长思维链逐步排查；再次点击即可解锁恢复自动收起。
+- **一键「查看原文 / 查看译文」切换**：右上角常驻语言切换按钮（`thought-lang-toggle`），点击即时切换中英文且阻止事件冒泡误触折叠，并在重挂载期间记住当前视图状态。
+- **直出中文门控与防秒收起体验**：未就绪英文句绝不闪现上屏（首波展示柔和中文占位「正在同步中文思考过程…」），首波 0ms 零防抖发车 + 句末标点即时锁定；短思维链译完后额外保留 **1.5s** 自然阅读期再优雅收起（断网时 **3.5s** 硬超时兜底）。
+
+### 2. Markdown 表格对话框自适应布局优化（`lkc` / `ckc` / `dkc` / `mkc` + `__agyTableEngine`）
+针对官方表格“短列强锁 `20ch` 大片留白、多列触发 `dkc` 阈值放弃缩放、长内容列向右溢出对话框被裁切、右上角 `⋮` 按钮压住表头文字”等痛点全面重构：
+- **智能权重列宽引擎（短列紧凑、长列宽敞）**：采用「单列保底 + 亚线性平滑权重 Water-Filling」算法按对话框实际可用宽度动态分配百分比列宽并启用 `table-layout: fixed`，消除短列多余空白，把主阅读宽度让给长说明列并自动安全折行；在宽屏独立窗口下打破官方 `320px` 硬编码上限，允许宽表居中舒展至可视边界；在窄侧边栏中精准贴合容器并关闭冗余 `translateX`，彻底消灭横向裁切与亚像素发虚。
+- **彻底解除长标识与文件胶囊撑爆**：移除单元格内文件胶囊 `.inline-pill-wrap` 的 `20ch` 最小宽死锁，同步为单元格内行内代码 `code` 开启 `overflow-wrap: anywhere` 安全折行，长文件路径与标识符不再撑破列宽。
+- **流式生成与窗口拖动实时重排**：通过 `data-agy-measuring` 隔离标记保证 AI 逐行流式输出表格时列宽测量 100% 纯净无污染；`ResizeObserver` 同步追踪对话正文列、表格与视口变化，拖动侧边栏宽度即时丝滑响应。
+- **超多列可读性底线保护与自由切换**：2–6 列常见表格默认 100% 贴合对话框零滚动；遇到 8–10+ 列超宽表或极窄窗口低于单列可读底线（内容 `< 52px`）时，温和回退至紧凑可控的横向滚动避免挤成竖排；随时可通过右上角 `⋮` 菜单一键切换 **「展开全宽 / 适应窗口」**，并为末列表头自动预留右侧内边距防止 `⋮` 按钮遮挡标题。
+
+### 3. 工程稳定性与跨版本自愈优化
+- **统一真相源架构**：`src/core_injector.js` 统一驱动手动部署（`patcher.js`）、启动自愈（`auto_updater.js`）与综合审查（`verifier.js`），消除多端能力漂移。
+- **23 项分层兼容探针 + 安全熔断**：IDE 更新后自动校验 23 项必选核心锚点（含思维链 `iAc` 与表格 `lkc`/`mkc` 强耦合符号组），全部兼容则全自动无损自愈重注入，遇到官方重构混淆符号则坚决熔断保护、保持官方原版启动绝不白屏。
+- **跨版本 `.bak` 防污染备份与校验和自愈**：检测到官方升级覆写原件时自动刷新纯净 `.bak`，同步重写 `product.json` 全量 SHA-256 校验和（杜绝“安装似乎损坏”警告），并安全清理 Electron V8 字节码缓存。
+- **轻量日志生命周期管理**：运行日志默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义），**严格仅保留最近 2 次完整运行记录**，避免长期堆积。
 
 ---
 
@@ -46,70 +61,45 @@ git clone https://github.com/mingk-ong/antigravity-ide-zh-cn.git
 cd antigravity-ide-zh-cn
 ```
 
-1. **执行汉化补丁**：双击运行 `run-patch.bat`
-2. **检验汉化生效状态**：双击运行 `run-verify.bat`
+1. **执行汉化与优化补丁**：双击运行 `run-patch.bat`
+2. **检验全链路生效状态**：双击运行 `run-verify.bat`
 3. **如需还原官方纯净英文版**：双击运行 `run-restore.bat`
 4. **（可选）配置随程自愈快捷方式**：右键以 PowerShell 运行 `setup_all_launch_hooks.ps1`（如需恢复原生快捷方式，运行 `restore_launcher.bat`）
 
 ### 方式二：使用 npm 命令行
 
 ```powershell
-# 1. 执行全量汉化、校验和同步与代理/翻译微服务部署
+# 1. 执行全量汉化、使用体验优化、校验和同步与代理/翻译微服务部署
 npm run patch
 
-# 2. 运行自动化生效检验（综合 / 14 屏幕 / 会话标题 / 思维链实时翻译）
+# 2. 运行自动化生效检验（综合 / 14 屏幕 / 会话标题 / 思维链翻译与交互 / Markdown 表格自适应）
 npm run verify
 npm run verify:screens
 npm run verify:titles
 npm run verify:thoughts
+npm run verify:tables
 
 # 3. 一键还原官方状态
 npm run restore
 ```
 
 ### 自定义会话标题字典（仅存本地，保护隐私）
-- 本仓库不包含官方闭源静态资源（`hub_main.js` / `hub_main_zh.js`），执行 `npm run patch` 时会自动从你本机 Antigravity IDE 安装目录读取并编译。
+- 本仓库不包含官方闭源静态资源（`hub_main.js` / `hub_main_zh.js`），执行 `npm run patch` 时会自动从本机 Antigravity IDE 安装目录同步并编译。
 - 如需为特定历史会话固定中文标题，可将 `src/title_dicts.example.json` 复制为 `src/title_dicts.json` 后按需编辑（该文件与 `src/title_cache.json` 均已加入 `.gitignore`，不会上传至远程仓库）。
 
 ---
 
-## 📋 截图元素汉化检验对照表
+## 📋 汉化与优化检验对照表
 
-| 界面区域 | 原始英文 (Before) | 汉化后效果 (After) | 检验状态 |
-| :--- | :--- | :--- | :--- |
-| **侧边栏标题** | `Settings` | `设置 (Settings)` | ✅ 通过 |
-| **侧边栏导航** | `General` | `通用设置` | ✅ 通过 |
-| **侧边栏导航** | `Appearance` | `外观偏好` | ✅ 通过 |
-| **侧边栏导航** | `Notifications` | `系统通知` | ✅ 通过 |
-| **侧边栏导航** | `Models` | `模型与额度` | ✅ 通过 |
-| **侧边栏导航** | `Browser` | `内置浏览器` | ✅ 通过 |
-| **侧边栏分组** | `Projects` | `项目分组 (Projects)` | ✅ 通过 |
-| **侧边栏分组** | `Not in Project` | `未归属项目` | ✅ 通过 |
-| **侧边栏项目** | `Conversations` | `对话历史` | ✅ 通过 |
-| **侧边栏按钮** | `Show All` / `Show Less` | `显示全部` / `收起列表` | ✅ 通过 |
-| **设置主面板** | `General` 标题与描述 | `通用设置 (General)` 及全中文详细说明 | ✅ 通过 |
-| **设置主面板** | `Global Permissions` | `全局资源权限 (Global Permissions)` | ✅ 通过 |
-| **设置主面板** | `Permission Preset` | `权限预设模板 (Permission Preset)` | ✅ 通过 |
-| **设置主面板** | `Turbo` 下拉选项与卡片 | `极速自主模式 (Turbo)` 及全中文风险描述 | ✅ 通过 |
-| **设置主面板** | `Controls the actions the agent can take.` | `控制智能体在当前环境下可执行操作的权限级别。` | ✅ 通过 |
-| **设置主面板** | `Tool Permissions` | `工具与终端权限 (Tool Permissions)` | ✅ 通过 |
-| **设置主面板** | `Network Access Rules` | `网络访问规则 (Network Access Rules)` | ✅ 通过 |
-| **设置主面板** | `Open` 按钮 | `打开配置` | ✅ 通过 |
-| **设置主面板** | `Execution` 分区 | `执行机制 (Execution)` | ✅ 通过 |
-| **设置主面板** | `Queued Messages` | `追问排队递交 (Queued Messages)` | ✅ 通过 |
-| **设置主面板** | `Send Immediately` / `Queue` | `立即递交 (Send Immediately)` / `空闲排队 (Queue)` | ✅ 通过 |
-| **设置主面板** | `Keyboard shortcuts` | `键盘快捷键` | ✅ 通过 |
-| **安全模式卡片**| `Agent security mode` | `智能体安全运行模式`（完全信任/沙盒/严格模式） | ✅ 通过 |
-| **主对话输入框**| `Ask anything, @ to mention, / for actions` | `向智能体提问，输入 @ 引用上下文，输入 / 触发动作` | ✅ 通过 |
-| **会话右键菜单**| `Rename` | `重命名` | ✅ 通过 |
-| **会话右键菜单**| `Pin` / `Unpin` | `固定对话` / `取消固定` | ✅ 通过 |
-| **会话右键菜单**| `Archive` | `归档对话` | ✅ 通过 |
-| **会话右键菜单**| `Split` | `拆分视图` | ✅ 通过 |
-| **会话右键菜单**| `Copy` | `复制` | ✅ 通过 |
-| **会话右键菜单**| `Stop` | `停止生成` | ✅ 通过 |
-| **全局操作菜单**| `Open Settings` | `打开设置` | ✅ 通过 |
-| **思维链头部** | `Thought for Xs` / `Thinking for Xs` | `思考了 X 秒` / `已思考 X 秒` | ✅ 通过 |
-| **思维链正文** | 云端英文思维摘要（含行内代码/路径） | 实时流式增量译文（支持「查看原文 / 查看译文」一键切换） | ✅ 通过 |
+| 类别 | 界面 / 能力区域 | 原始状态 (Before) | 汉化与优化后效果 (After) | 检验状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| **汉化** | 侧边栏与设置主面板 | `Settings` / `General` / `Appearance` / `Models` 等 14 屏英文 | 全中文导航、标题、描述、权限卡片与选项下拉（保留原始路由 Key） | ✅ 通过 |
+| **汉化** | 主对话输入框与右键菜单 | `Ask anything, @ to mention` / `Rename` / `Pin` / `Archive` / `Split` | `向 Antigravity 提问，输入 @ 提及` / `重命名` / `固定会话` / `归档会话` / `拆分视图` | ✅ 通过 |
+| **汉化** | 会话历史标题 | 云端生成英文对话标题 | 1~2 秒自动中文化并通过原生 RPC 持久化写入本地数据库 | ✅ 通过 |
+| **汉化** | 思维链头部与正文 | `Thought for Xs` + 英文思维摘要 | `思考了 X 秒` + 实时流式中文译文（代码/路径/波浪号无损隔离） | ✅ 通过 |
+| **优化** | 思维链点击与悬停交互 | 思考完秒收起、后续步骤推高滚动打断阅读、无法锁定展开 | 悬停防打断锁定 + 右上角小锁常驻展开 + 一键原文/译文切换 + 离区 350ms 自动收起 | ✅ 通过 |
+| **优化** | Markdown 表格自适应 | 短列锁死 `20ch` 大片留白、长列向右溢出裁切、`⋮` 遮挡表头 | 智能权重按对话框宽度贴合折行、解除胶囊 `20ch` 锁死、超多列底线保护、菜单汉化与防遮挡 | ✅ 通过 |
+| **优化** | 更新自愈与防损坏校验 | 更新即失效、改包弹“安装似乎损坏”警告 | 23 项锚点探针自动自愈/安全熔断 + `product.json` 全量校验和对齐 + 日志仅留最近 2 次 | ✅ 通过 |
 
 ---
 
@@ -117,6 +107,5 @@ npm run restore
 
 > [!IMPORTANT]
 > 由于 Antigravity IDE 开启了系统托盘后台驻留特性（Keep In Menu Bar），单纯点击窗口右上角的 `X` 不会退出主进程。请务必：
-> 1. 在系统右下角托盘图标处右键退出 Antigravity IDE（或在窗口中按 `Ctrl+Shift+P` 执行 `Reload Window`）；
-> 2. 重新启动 Antigravity IDE；
-> 3. 此时 Electron 将载入已清空缓存的全新 `out/main.js`，呈现 100% 中文化界面！
+> 1. 在窗口中按 `Ctrl+Shift+P` 执行 **`Developer: Reload Window`**（或在系统右下角托盘图标处右键彻底退出 Antigravity IDE 后重新启动）；
+> 2. Electron 将重新载入最新版 `hub_main_zh.js`，立即体验全中文界面、思维链交互优化与 Markdown 表格对话框自适应！

@@ -4,8 +4,8 @@ const { applyAllPatches } = require('./core_injector');
 async function runPatch() {
   const startTime = Date.now();
   console.log('====================================================');
-  console.log('  Antigravity IDE 深度全量汉化引擎 (Hub & Webview 增强版)');
-  console.log('  覆盖层级: 外层工作台 + 内嵌 Webview Hub 网页应用');
+  console.log('  Antigravity IDE 深度汉化与使用优化引擎 (Hub & Webview)');
+  console.log('  覆盖层级: 外层工作台 + Hub 全量汉化 + 思维链/表格体验优化');
   console.log('====================================================\n');
 
   applyAllPatches({

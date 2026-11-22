@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 > nul
-title Antigravity IDE 汉化生效与防损坏状态校验
+title Antigravity IDE 汉化与使用优化状态校验
 
 echo ====================================================
-echo   Antigravity IDE 汉化生效与防损坏状态全量检验
+echo   Antigravity IDE 汉化与使用优化全链路状态检验
 echo ====================================================
 echo.
 
