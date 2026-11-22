@@ -34,6 +34,15 @@ try {
   } catch (_e) {}
 }
 
+let thoughtTranslator = null;
+try {
+  thoughtTranslator = require('./thought_translator.js');
+} catch (e) {
+  try {
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [Proxy ERROR] Failed to load thought_translator.js: ${e.message}\n`);
+  } catch (_e) {}
+}
+
 function log(msg) {
   try {
     if (fs.existsSync(logFile)) {
@@ -71,9 +80,67 @@ function sendJson(res, statusCode, payload) {
     'Content-Length': Buffer.byteLength(body, 'utf8'),
     'Cache-Control': 'no-store, no-cache, must-revalidate',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS'
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
   });
   res.end(body);
+}
+
+function readJsonBody(req, maxBytes = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', chunk => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        req.destroy();
+        reject(new Error('Payload too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+async function handleTranslateThoughtRequest(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
+    return;
+  }
+
+  try {
+    if (!thoughtTranslator) {
+      sendJson(res, 200, { ok: false, results: [], error: 'thought_translator unavailable' });
+      return;
+    }
+    const body = await readJsonBody(req);
+    const items = Array.isArray(body?.items) ? body.items : [];
+    const result = await thoughtTranslator.translateThoughtBatch(items);
+    const st = result.stats || {};
+    log(`[Translate Thought] total=${st.total} cache=${st.cacheHits} static=${st.staticHits} translated=${st.translatedCount} cost=${st.costMs}ms`);
+    sendJson(res, 200, result);
+  } catch (err) {
+    log(`[Translate Thought ERROR] ${err.message}`);
+    sendJson(res, 400, { ok: false, results: [], error: err.message });
+  }
 }
 
 async function handleTranslateTitleRequest(req, res, url) {
@@ -148,6 +215,22 @@ function initProxy() {
     // 0.5 实时对话标题翻译微服务端点
     if (url === '/translate-title' || url.startsWith('/translate-title?')) {
       handleTranslateTitleRequest(req, res, url);
+      return;
+    }
+
+    // 0.6 思维链实时流式批量翻译微服务端点与缓存管理
+    if (url === '/translate-thought' || url.startsWith('/translate-thought?')) {
+      handleTranslateThoughtRequest(req, res);
+      return;
+    }
+
+    if (url === '/thought-cache-stats') {
+      sendJson(res, 200, thoughtTranslator ? { ok: true, ...thoughtTranslator.getCacheStats() } : { ok: false });
+      return;
+    }
+
+    if (url === '/thought-cache-clear' && req.method === 'POST') {
+      sendJson(res, 200, thoughtTranslator ? thoughtTranslator.clearThoughtCache() : { ok: false });
       return;
     }
 
@@ -287,5 +370,6 @@ module.exports = {
   redirectIframeUrl,
   getTargetPort: () => targetPort,
   getProxyPort: () => proxyPort,
-  handleTranslateTitleRequest
+  handleTranslateTitleRequest,
+  handleTranslateThoughtRequest
 };

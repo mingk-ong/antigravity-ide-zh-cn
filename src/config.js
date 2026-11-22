@@ -17,6 +17,24 @@ function getLogDir() {
 }
 
 /**
+ * 获取纯本地高速缓存目录（避开 OneDrive 同步目录，防止高频写入引发文件锁冲突）
+ */
+function getCacheDir() {
+  const customDir = (process.env.AGY_ZH_CACHE_DIR || '').trim();
+  const localAppData = process.env.LOCALAPPDATA || '';
+  const defaultDir = localAppData
+    ? path.join(localAppData, 'antigravity-zh-cn', 'cache')
+    : path.join(os.homedir(), '.antigravity-zh-cn', 'cache');
+  const cacheDir = customDir || defaultDir;
+  if (!fs.existsSync(cacheDir)) {
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    } catch (_e) {}
+  }
+  return cacheDir;
+}
+
+/**
  * 获取指定日志文件的完整路径
  */
 function getLogFile(fileName) {
@@ -31,13 +49,14 @@ function getMetaFilePath(agyExtDir) {
 }
 
 /**
- * 将当前机器的源码目录与日志目录写入扩展目录元数据（仅本机使用，不入库）
+ * 将当前机器的源码目录、日志目录与纯本地缓存目录写入扩展目录元数据（仅本机使用，不入库）
  */
 function writeDeployMeta(agyExtDir, patchSrcDir) {
   try {
     const meta = {
       patchSrcDir: path.resolve(patchSrcDir),
       logDir: getLogDir(),
+      cacheDir: getCacheDir(),
       updatedAt: new Date().toISOString()
     };
     fs.writeFileSync(getMetaFilePath(agyExtDir), JSON.stringify(meta, null, 2), 'utf8');
@@ -109,6 +128,7 @@ function getTargetPaths() {
 module.exports = {
   getTargetPaths,
   getLogDir,
+  getCacheDir,
   getLogFile,
   getMetaFilePath,
   writeDeployMeta

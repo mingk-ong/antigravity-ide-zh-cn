@@ -13,18 +13,23 @@
    - **`resources/app/extensions/agy/package.json`**：扩展命令与视图容器配置。
 2. **展示层拦截机制（零副作用）**：
    - 采用 `a0e(e)`、`tct(t)`、`SY` 与 `PUe` 导航拦截，只将显示的 Label 翻译为中文，保留原始路由 key（`display: e === "General"`），杜绝右侧面板空白或失效。
-3. **会话标题（Conversations）双核全量中文化与自适应词根引擎**：
-   - 深入拦截侧边栏真实运行载体 `hub_main_zh.js` 中的 `XB(a)` 命门函数与 `rEc` 列表生成器；
-   - 联动主界面 `workbench.desktop.main.js`（`yhn`）与 AI 面板 `jetskiAgent/main.js`（`est`/`uEn`/`sMa`）；
-   - 内置**精准 ID 字典 + 常见短语字典 + 自适应动作/名词词根重组引擎**，无论云端下发何种英文标题，界面毫秒级自动渲染为地道简体中文；
-   - 具备全链路实时追踪日志系统，默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义目录）。
+3. **会话标题（Conversations）实时自动翻译与原生 RPC 持久化中文化**：
+   - 深入拦截侧边栏真实运行载体 `hub_main_zh.js` 中的 `XB(a)` 命门函数及 4 处绕过渲染点，并在根组件 `vcc` 注入 Redux 实时订阅守卫；
+   - 联动本地 `14588` 代理提供 `/translate-title` 多源翻译微服务（微软必应 → 彩云小译 → 腾讯 TranSmart → 本地离线兜底），新对话生成英文标题后 1~2 秒内自动调用官方原生 `updateConversationAnnotations` RPC 永久回写本地数据库；
+   - 同步联动外层 `workbench.desktop.main.js`（`yhn`）与 `jetskiAgent/main.js`（`est`/`uEn`/`sMa`）；
+   - 具备全链路实时追踪日志系统，默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义目录）；
    - 详细排查历程见专题白皮书：[会话标题中文化与全链路故障排查白皮书](docs/CONVERSATION_TITLE_LOCALIZATION.md)。
-4. **SHA-256 校验和全量自愈同步（杜绝损坏警告）**：
+4. **思维链（`Thought for`）实时流式翻译与 JSONL 分层缓存（v1.3.0 新增）**：
+   - 静态汉化 `Thought for Xs` → `思考了 X 秒`、`Thinking for Xs` → `已思考 X 秒`、`Thought Process` → `思考过程`、`Thinking...` → `正在思考...`（同步覆盖 Hub 与 `jetskiAgent`）；
+   - 前端 `iAc` 组件内置等长掩码安全断句器（规避文件名/版本号/缩写句点陷阱并保留 `\n\n\n` 段落结构），采用 **200ms 防抖批量锁定 + 超长未闭合半句临时预译不落盘 + 右上角「查看原文 / 查看译文」一键切换**；
+   - 代理微服务 `thought_translator.js` 新增 `POST /translate-thought`、`GET /thought-cache-stats`、`POST /thought-cache-clear` 路由：启用 HTTP/HTTPS Keep-Alive 连接池，优先腾讯 TranSmart 原生批量通道（连续流式 ~200–300ms），动态零冲突锚点隔离行内代码/URL/路径并防 GFM 波浪号删除线误渲染；支持通过 `AGY_ZH_THOUGHT_LLM_URL` 接入本地 Ollama 或 OpenAI 兼容轻量 LLM；
+   - 缓存采用纯本地 Append-Only JSONL（默认 `%LOCALAPPDATA%\antigravity-zh-cn\cache\thought_cache.jsonl`，支持 `AGY_ZH_CACHE_DIR` 覆盖，自动避开 OneDrive），具备 **500ms 写合并、读命中 0 刷盘、崩溃残行容错、30 天按访问续命 TTL / 15,000 条 / 6 MB 惰性原子压缩与质量权重分级覆盖**。
+5. **SHA-256 校验和全量自愈同步（杜绝损坏警告）**：
    - 自动按照 VS Code 内核规范计算新文件的 Base64 校验和，同步写回 `product.json`，完美通过内核自检。
-5. **V8 字节码与缓存自动清理**：
+6. **V8 字节码与缓存自动清理**：
    - 每次打补丁时自动安全清理 `%APPDATA%\Antigravity IDE\CachedData` 下的历史字节码缓存，彻底防止 Electron 加载旧代码。
-6. **全方位检验与审计日志**：
-   - 内置自动化验证引擎 `run-verify.bat`（`src/verifier.js`），支持逐项检查校验和一致性与 27 项界面元素的实际命中状态。
+7. **全方位检验与审计日志**：
+   - 内置自动化验证套件：`run-verify.bat`（`src/verifier.js`）、`verify_all_14_screens.js`（53 项设置页验收）、`verify_title_localization.js`（15 项标题自动化验收）与 `verify_thought_localization.js`（12 项思维链流式与 JSONL 缓存验收）。
 
 ---
 
@@ -49,11 +54,14 @@ cd antigravity-ide-zh-cn
 ### 方式二：使用 npm 命令行
 
 ```powershell
-# 1. 执行全量汉化、校验和同步与代理部署
+# 1. 执行全量汉化、校验和同步与代理/翻译微服务部署
 npm run patch
 
-# 2. 运行自动化生效检验
+# 2. 运行自动化生效检验（综合 / 14 屏幕 / 会话标题 / 思维链实时翻译）
 npm run verify
+npm run verify:screens
+npm run verify:titles
+npm run verify:thoughts
 
 # 3. 一键还原官方状态
 npm run restore
@@ -100,6 +108,8 @@ npm run restore
 | **会话右键菜单**| `Copy` | `复制` | ✅ 通过 |
 | **会话右键菜单**| `Stop` | `停止生成` | ✅ 通过 |
 | **全局操作菜单**| `Open Settings` | `打开设置` | ✅ 通过 |
+| **思维链头部** | `Thought for Xs` / `Thinking for Xs` | `思考了 X 秒` / `已思考 X 秒` | ✅ 通过 |
+| **思维链正文** | 云端英文思维摘要（含行内代码/路径） | 实时流式增量译文（支持「查看原文 / 查看译文」一键切换） | ✅ 通过 |
 
 ---
 

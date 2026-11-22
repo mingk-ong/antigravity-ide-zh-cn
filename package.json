@@ -1,13 +1,14 @@
 {
   "name": "antigravity-ide-zh-cn",
-  "version": "1.2.0",
-  "description": "Antigravity IDE 深度全量汉化、会话标题自动中文化、更新自愈与防损坏校验工具包",
+  "version": "1.3.0",
+  "description": "Antigravity IDE 深度全量汉化、会话标题自动中文化、思维链实时流式翻译、更新自愈与防损坏校验工具包",
   "main": "src/patcher.js",
   "scripts": {
     "patch": "node src/patcher.js",
     "verify": "node src/verifier.js",
     "verify:screens": "node verify_all_14_screens.js",
     "verify:titles": "node verify_title_localization.js",
+    "verify:thoughts": "node verify_thought_localization.js",
     "restore": "node src/restore.js"
   },
   "keywords": [

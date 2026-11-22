@@ -32,6 +32,7 @@ const EXT_DIR = path.join(RESOURCES_APP, 'extensions', 'agy');
 const EXT_JS = path.join(EXT_DIR, 'vscode', 'extension.js');
 const PROXY_JS = path.join(EXT_DIR, 'hub_proxy.js');
 const TRANSLATOR_JS = path.join(EXT_DIR, 'title_translator.js');
+const THOUGHT_TRANSLATOR_JS = path.join(EXT_DIR, 'thought_translator.js');
 const ZH_MAIN_JS = path.join(EXT_DIR, 'hub_main_zh.js');
 const LIVE_HUB_MAIN = path.join(EXT_DIR, 'hub_main.js');
 const SRC_HUB_MAIN = path.join(PATCH_DIR, 'hub_main.js');
@@ -132,25 +133,33 @@ function inspectHealthDeeply() {
     report.details.extension = { ok: false, error: '文件不存在' };
   }
 
-  // 2. 检查反向代理 hub_proxy.js 与标题翻译微服务 title_translator.js
-  if (fs.existsSync(PROXY_JS) && fs.existsSync(TRANSLATOR_JS)) {
+  // 2. 检查反向代理 hub_proxy.js 与标题/思维链翻译微服务
+  if (fs.existsSync(PROXY_JS) && fs.existsSync(TRANSLATOR_JS) && fs.existsSync(THOUGHT_TRANSLATOR_JS)) {
     const stat = fs.statSync(PROXY_JS);
     const content = fs.readFileSync(PROXY_JS, 'utf8');
     const hasFixedPort = content.includes('14588');
     const hasTranslateEndpoint = content.includes('/translate-title');
+    const hasThoughtEndpoint = content.includes('/translate-thought');
+    const endpointsOk = hasTranslateEndpoint && hasThoughtEndpoint;
     report.details.proxy = {
       path: PROXY_JS,
       size: formatBytes(stat.size),
       port: hasFixedPort ? '固定高位端口 14588 (消除时序竞争)' : '动态端口',
-      translateEndpoint: hasTranslateEndpoint ? '已启用 /translate-title 微服务' : '缺失翻译端点',
-      ok: hasTranslateEndpoint
+      translateEndpoint: endpointsOk
+        ? '已启用 /translate-title 与 /translate-thought 双微服务'
+        : '缺少标题或思维链翻译端点',
+      ok: endpointsOk
     };
-    if (!hasTranslateEndpoint) {
+    if (!endpointsOk) {
       report.valid = false;
-      report.failures.push('hub_proxy.js 缺少 /translate-title 实时标题翻译端点（需升级代理模板）');
+      report.failures.push('hub_proxy.js 缺少 /translate-title 或 /translate-thought 实时翻译端点（需升级代理模板）');
     }
   } else {
-    const missingDesc = !fs.existsSync(PROXY_JS) ? 'hub_proxy.js 不存在' : 'title_translator.js 标题翻译微服务缺失';
+    const missingDesc = !fs.existsSync(PROXY_JS)
+      ? 'hub_proxy.js 不存在'
+      : !fs.existsSync(TRANSLATOR_JS)
+        ? 'title_translator.js 标题翻译微服务缺失'
+        : 'thought_translator.js 思维链实时翻译微服务缺失';
     report.valid = false;
     report.failures.push(missingDesc);
     report.details.proxy = { ok: false, error: missingDesc };
@@ -171,8 +180,11 @@ function inspectHealthDeeply() {
       content.includes('软件界面中文化设置') &&
       content.includes('__agyTitleAutoLocalizer') &&
       content.includes('updateConversationAnnotations');
+    const hasThoughtEngine = content.includes('__agyThoughtEngine') &&
+      content.includes('/translate-thought') &&
+      content.includes('思考了 ');
 
-    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine;
+    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine;
 
     report.details.zhBundle = {
       path: ZH_MAIN_JS,
@@ -184,13 +196,14 @@ function inspectHealthDeeply() {
         yT_分区折叠面板: hasYt ? '✔ 注入正常' : '❌ 缺失',
         xT_设置卡片行: hasXt ? '✔ 注入正常' : '❌ 缺失',
         XB_会话标题枢纽: hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
+        iAc_思维链流式翻译: hasThoughtEngine ? '✔ 实时流式翻译与缓存就绪' : '❌ 缺失/版本过旧',
         DOM_运行时清洗器: hasDomCleaner ? '✔ 挂载正常' : '❌ 缺失'
       },
       ok: allEnginesOk
     };
     if (!allEnginesOk) {
       report.valid = false;
-      report.failures.push('hub_main_zh.js 汉化引擎或实时标题自动化守卫指纹不完整');
+      report.failures.push('hub_main_zh.js 汉化引擎、标题守卫或思维链实时翻译指纹不完整');
     }
   } else {
     report.valid = false;
@@ -272,7 +285,7 @@ function inspectHealthDeeply() {
 }
 
 /**
- * 阶段二：新版本特征指纹兼容性探针 (9大核心锚点)
+ * 阶段二：新版本特征指纹兼容性探针 (10大核心锚点)
  */
 function probeVersionCompatibility(targetHubMainPath) {
   if (!fs.existsSync(targetHubMainPath)) {
@@ -339,6 +352,12 @@ function probeVersionCompatibility(targetHubMainPath) {
       name: 'Hub 对话注释与状态挂载组件 (vcc)',
       pattern: 'var vcc=()=>{var a=SO(),b=Xk(),c=ZP(),d=xQ(),{updateConversationAnnotations:f}=PB(),g=tC(),h=wQ();',
       desc: '负责挂载 Redux 状态订阅及官方原生 updateConversationAnnotations RPC 持久化守卫'
+    },
+    {
+      id: 'iAc',
+      name: '思维链思考过程渲染组件 (iAc)',
+      pattern: 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{',
+      desc: '负责渲染 Thought for 折叠面板及流式思维链实时翻译与原文/译文切换'
     }
   ];
 
@@ -407,6 +426,18 @@ function applyFullLocalization(logger) {
       logger('  ✔ 已同步更新标题翻译微服务模块: title_translator.js');
     } else {
       logger('  ✔ 标题翻译微服务模块 title_translator.js 已为最新版本');
+    }
+  }
+
+  const srcThoughtTranslator = path.join(PATCH_DIR, 'src', 'thought_translator.js');
+  if (fs.existsSync(srcThoughtTranslator)) {
+    const srcThoughtBuf = fs.readFileSync(srcThoughtTranslator);
+    const needSyncThought = !fs.existsSync(THOUGHT_TRANSLATOR_JS) || Buffer.compare(srcThoughtBuf, fs.readFileSync(THOUGHT_TRANSLATOR_JS)) !== 0;
+    if (needSyncThought) {
+      fs.copyFileSync(srcThoughtTranslator, THOUGHT_TRANSLATOR_JS);
+      logger('  ✔ 已同步更新思维链实时翻译微服务模块: thought_translator.js');
+    } else {
+      logger('  ✔ 思维链实时翻译微服务模块 thought_translator.js 已为最新版本');
     }
   }
   writeDeployMeta(EXT_DIR, path.join(PATCH_DIR, 'src'));
@@ -533,7 +564,7 @@ function main() {
   if (health.details.zhBundle && health.details.zhBundle.ok) {
     appendLog(`  ✔ 汉化资产 (hub_main_zh.js) : 完整 [大小: ${health.details.zhBundle.size}]`);
     const eng = health.details.zhBundle.engines;
-    appendLog(`     └─► 引擎指纹核验: sT配置工厂(${eng.sT_元数据工厂}) | uT大标题(${eng.uT_顶层标题卡片}) | yT分区(${eng.yT_分区折叠面板}) | xT设置行(${eng.xT_设置卡片行}) | XB标题枢纽(${eng.XB_会话标题枢纽}) | DOM清洗(${eng.DOM_运行时清洗器})`);
+    appendLog(`     └─► 引擎指纹核验: sT配置工厂(${eng.sT_元数据工厂}) | uT大标题(${eng.uT_顶层标题卡片}) | yT分区(${eng.yT_分区折叠面板}) | xT设置行(${eng.xT_设置卡片行}) | XB标题枢纽(${eng.XB_会话标题枢纽}) | iAc思维链(${eng.iAc_思维链流式翻译}) | DOM清洗(${eng.DOM_运行时清洗器})`);
   } else {
     appendLog(`  ❌ 汉化资产 (hub_main_zh.js) : 异常 [${health.details.zhBundle?.error || '组件指纹不完整'}]`);
   }
@@ -565,7 +596,7 @@ function main() {
     const probe = probeVersionCompatibility(candidatePath);
 
     appendLog(`  • 评估目标: ${candidatePath} (体积: ${formatBytes(probe.codeLength)})`);
-    appendLog(`  • 核心特征探测结果 (共 9 项核心锚点):`);
+    appendLog(`  • 核心特征探测结果 (共 10 项核心锚点):`);
     for (const anchor of probe.matchedAnchors) {
       appendLog(`     ✔ [命中] ${anchor.name} (代码偏移: ${anchor.offset} 字节)`);
     }

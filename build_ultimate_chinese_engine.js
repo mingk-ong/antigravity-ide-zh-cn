@@ -367,7 +367,7 @@ const xbReplacement = `function XB(a){
   return _raw;
 }`;
 code = code.replace(xbTarget, xbReplacement);
-console.log('✔ [锚点 1/6] 已重建 XB(a) 会话标题输出枢纽');
+console.log('✔ [锚点 1/8] 已重建 XB(a) 会话标题输出枢纽');
 
 // 2.4.2 封堵 4 处绕过 XB(a) 直接读取 annotations?.title / title 的渲染点
 const bypassRules = [
@@ -399,7 +399,7 @@ for (let i = 0; i < bypassRules.length; i++) {
     throw new Error(`❌ 未命中绕过点 [${rule.name}]: ${rule.from}`);
   }
   code = code.replace(rule.from, rule.to);
-  console.log(`✔ [锚点 ${i + 2}/6] 已封堵绕过点: ${rule.name}`);
+  console.log(`✔ [锚点 ${i + 2}/8] 已封堵绕过点: ${rule.name}`);
 }
 
 // 2.4.3 在 Hub 根组件 vcc 注入实时 Redux 监听与原生 RPC 自动翻译持久化守卫
@@ -540,7 +540,205 @@ const vccWatcherBlock = `(0,D.useEffect)(()=>{
   }catch(_ee){}
 },[b,f]);`;
 code = code.replace(vccAnchor, vccAnchor + vccWatcherBlock);
-console.log('✔ [锚点 6/6] 已注入 vcc 实时监听与原生 RPC 标题持久化守卫');
+console.log('✔ [锚点 6/8] 已注入 vcc 实时监听与原生 RPC 标题持久化守卫');
+
+// 2.4.4 思维链头部计时与侧边追问标签静态汉化 (hAc / 侧边追问)
+const hacTarget = 'd>=0?`Thinking for ${Math.max(1,d)}s`:"Thinking"';
+if (!code.includes(hacTarget)) {
+  throw new Error('❌ 未找到 hAc 思考计时头部锚点，终止编译！');
+}
+code = code.replace(hacTarget, 'd>=0?`已思考 ${Math.max(1,d)} 秒`:"正在思考"');
+console.log('✔ [锚点 7/8] 已汉化 hAc 思考耗时头部动画文案');
+
+// 侧边追问 (Side Question) 中的思考标签静态汉化
+const sideThoughtPairs = [
+  {
+    from: 'q?`Thought for ${Math.max(1,Number(q.seconds))}s`:"Thought Process":"Thinking..."',
+    to: 'q?`思考了 ${Math.max(1,Number(q.seconds))} 秒`:"思考过程":"正在思考..."'
+  },
+  {
+    from: '`Thought for ${Math.max(1,Number(S.seconds))}s`:"Thought Process"',
+    to: '`思考了 ${Math.max(1,Number(S.seconds))} 秒`:"思考过程"'
+  },
+  {
+    from: 'opacity-70 animate-pulse"},"Thinking..."',
+    to: 'opacity-70 animate-pulse"},"正在思考..."'
+  },
+  {
+    from: '"aria-label":"Thinking..."',
+    to: '"aria-label":"正在思考..."'
+  }
+];
+for (const sp of sideThoughtPairs) {
+  if (code.includes(sp.from)) {
+    code = code.split(sp.from).join(sp.to);
+  }
+}
+
+// 2.4.5 核心注入：重构 iAc 思维链组件（语义边界增量锁定 + 450ms 批处理防抖 + 原文/译文切换）
+const iacStartMarker = 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{';
+const iacIdx = code.indexOf(iacStartMarker);
+if (iacIdx === -1) {
+  throw new Error('❌ 未找到 iAc 思维链渲染组件起点，终止编译！');
+}
+const iacEndIdx = code.indexOf(';var jAc=', iacIdx);
+if (iacEndIdx === -1) {
+  throw new Error('❌ 未找到 iAc 思维链渲染组件终点 (;var jAc=)，终止编译！');
+}
+const oldIac = code.slice(iacIdx, iacEndIdx + 1);
+const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{
+  var {renderers:{markdown:g},verboseAgentChat:h}=tI(),
+    k=h??!1,
+    l=d5b()===J.CascadeRunStatus.RUNNING,
+    m=(d===J.CortexStepStatus.RUNNING||d===J.CortexStepStatus.GENERATING)&&l&&!f&&!b;
+  var _feat=Fj(),_n=pqc(),_steer=_feat.get("conversationView")?.trajectorySteering,_steerBtn=_steer?.SteerButton,_steerEd=_steer?.SteerableThoughtEditor;
+  var [_exp,_setExp]=(0,D.useState)(m);
+  var [_showOrig,_setShowOrig]=(0,D.useState)(!1);
+  var [_tick,_setTick]=(0,D.useState)(0);
+  var [_translating,_setTranslating]=(0,D.useState)(!1);
+  var _prevMRef=(0,D.useRef)(m);
+  var _seqRef=(0,D.useRef)(0);
+  var _tempTailRef=(0,D.useRef)(new Map());
+  var _failedRef=(0,D.useRef)(new Map());
+  var _tailTrackRef=(0,D.useRef)({prefix:"",ts:0,sentKey:""});
+  var _debounceRef=(0,D.useRef)(null);
+  var _tailTimerRef=(0,D.useRef)(null);
+  (0,D.useEffect)(()=>{
+    if(_prevMRef.current!==m){
+      _prevMRef.current=m;
+      _setExp(m);
+    }
+  },[m]);
+  (0,D.useEffect)(()=>{
+    var _alive=!0;
+    var _cleanup=()=>{
+      if(_debounceRef.current){clearTimeout(_debounceRef.current);_debounceRef.current=null;}
+      if(_tailTimerRef.current){clearTimeout(_tailTimerRef.current);_tailTimerRef.current=null;}
+    };
+    try{
+      if(!a||!k||!_exp||_showOrig)return _cleanup;
+      var _eng=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+      if(!_eng)return _cleanup;
+      var _parts=_eng.splitThoughtSegments(a,m);
+      var _needCommitted=[];
+      var _seenBatch=new Set();
+      var _tailPart=null;
+      for(var _i=0;_i<_parts.length;_i++){
+        var _pt=_parts[_i];
+        if(_pt.kind!=="sent"||!_pt.translatable)continue;
+        if(_pt.committed){
+          if(!_eng.lookupSync(_pt.norm,_pt.key)&&!_seenBatch.has(_pt.key)&&((_failedRef.current.get(_pt.key)||0)<2)){
+            _seenBatch.add(_pt.key);
+            _needCommitted.push({id:_pt.key,text:_pt.norm,persist:!0});
+          }
+        }else{
+          _tailPart=_pt;
+        }
+      }
+      if(_needCommitted.length>0){
+        var _runCommitted=async function(){
+          var _mySeq=++_seqRef.current;
+          if(_alive)_setTranslating(!0);
+          try{
+            var _res=await _eng.requestBatch(_needCommitted);
+            if(_res&&_res.ok&&Array.isArray(_res.results)){
+              var _changed=!1;
+              for(var _rIdx=0;_rIdx<_res.results.length;_rIdx++){
+                var _rItem=_res.results[_rIdx];
+                if(_rItem&&_rItem.translated&&_rItem.source!=="fallback"&&_rItem.source!=="skip"){
+                  _eng.setCached(_rItem.id,_rItem.translated);
+                  _tempTailRef.current.delete(_rItem.id);
+                  _failedRef.current.delete(_rItem.id);
+                  _changed=!0;
+                }else if(_rItem&&_rItem.source==="fallback"){
+                  _failedRef.current.set(_rItem.id,(_failedRef.current.get(_rItem.id)||0)+1);
+                }
+              }
+              if(_alive&&_changed)_setTick(function(_v){return _v+1;});
+            }
+          }catch(_e){}finally{
+            if(_alive&&_mySeq===_seqRef.current)_setTranslating(!1);
+          }
+        };
+        if(!m){
+          _runCommitted();
+        }else{
+          _debounceRef.current=setTimeout(_runCommitted,200);
+        }
+      }else if(m&&_tailPart){
+        var _tPrefix=_tailPart.norm.slice(0,24);
+        var _now=Date.now();
+        if(_tailTrackRef.current.prefix!==_tPrefix){
+          _tailTrackRef.current={prefix:_tPrefix,ts:_now,sentKey:""};
+        }
+        if(_tailPart.norm.length>=140&&_tailTrackRef.current.sentKey!==_tailPart.key&&!_tempTailRef.current.has(_tailPart.key)){
+          var _wait=Math.max(0,1500-(_now-_tailTrackRef.current.ts));
+          var _capKey=_tailPart.key,_capText=_tailPart.norm;
+          _tailTimerRef.current=setTimeout(async function(){
+            if(!_alive)return;
+            _tailTrackRef.current.sentKey=_capKey;
+            try{
+              var _tRes=await _eng.requestBatch([{id:_capKey,text:_capText,persist:!1}]);
+              if(_alive&&_tRes&&_tRes.ok&&_tRes.results&&_tRes.results[0]){
+                var _first=_tRes.results[0];
+                if(_first.translated&&_first.source!=="fallback"&&_first.source!=="skip"){
+                  _tempTailRef.current.set(_capKey,_first.translated);
+                  _setTick(function(_v){return _v+1;});
+                }
+              }
+            }catch(_te){}
+          },_wait);
+        }
+      }
+    }catch(_err){}
+    return function(){
+      _alive=!1;
+      _cleanup();
+    };
+  },[a,k,m,_exp,_showOrig]);
+  if(!a)return null;
+  if(!k)return m?D.createElement("div",{className:"flex w-full items-center gap-1.5 px-2 min-h-8 text-left rounded-lg text-muted-foreground tabular-nums select-none"},D.createElement(uY,null,D.createElement(hAc,{metadata:c}))):null;
+  var _rendered=a,_hasEn=!1;
+  try{
+    var _engRender=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+    if(_engRender){
+      var _rParts=_engRender.splitThoughtSegments(a,m);
+      for(var _ri=0;_ri<_rParts.length;_ri++){
+        if(_rParts[_ri].kind==="sent"&&_rParts[_ri].translatable){_hasEn=!0;break;}
+      }
+      if(_hasEn&&!_showOrig){
+        _rendered=_engRender.composeDisplay(_rParts,_tempTailRef.current);
+      }
+    }
+  }catch(_re){_rendered=a;}
+  var p=b?\`思考了 \${Math.max(1,Number(b.seconds))} 秒\`:"思考过程";
+  var _renderBody=(q,t)=>{
+    var _content=q===a?_rendered:q;
+    return D.createElement("div",{className:"cursor-edit group relative text-secondary-foreground pl-2"},
+      _hasEn&&D.createElement("div",{className:"flex items-center justify-end gap-2 pb-1 text-[11px] text-muted-foreground/75 select-none"},
+        _translating&&!_showOrig&&D.createElement("span",{className:"animate-pulse"},"实时译文中…"),
+        D.createElement("button",{
+          type:"button",
+          "data-testid":"thought-lang-toggle",
+          className:"px-1.5 py-0.5 rounded hover:bg-muted/60 hover:text-foreground transition-colors cursor-pointer",
+          onClick:function(_ev){_ev.stopPropagation();_setShowOrig(function(_v){return !_v;});}
+        },_showOrig?"查看译文":"查看原文")
+      ),
+      D.createElement(g,{animate:t&&m},_content)
+    );
+  };
+  return D.createElement(n2,{
+    trigger:q=>D.createElement(uY,{active:m,className:"text-muted-foreground"},m||_n?D.createElement(hAc,{metadata:c,doneText:m?void 0:p,animate:!q}):p),
+    isActive:m,
+    dataTestId:"thinking-collapsible-trigger",
+    onToggle:_open=>{_setExp(!!_open);},
+    maxHeight:200,
+    autoScroll:!0,
+    smoothScroll:!1
+  },_steerBtn&&D.createElement(_steerBtn,{metadata:c,isRunning:l}),_steerEd?D.createElement(_steerEd,{metadata:c,thinking:a,isRunning:l},_renderBody):_renderBody(a,l));
+};`;
+code = code.replace(oldIac, newIac);
+console.log('✔ [锚点 8/8] 已重构 iAc 思维链实时流式翻译与增量锁定引擎');
 
 // 2.5 终极注入：劫持设置元数据工厂 sT(a)
 const stHeader = 'function sT(a){';
@@ -748,7 +946,272 @@ const runtimeTitleCacheInit = `
 })();
 `;
 
-code = runtimeTitleCacheInit + '\n' + domCleanerScript + '\n' + code;
+const thoughtEngineRuntimeScript = `
+// =========================================================================
+// Antigravity 思维链实时流式翻译与 L1 内存 LRU 引擎 (__agyThoughtEngine)
+// =========================================================================
+(function() {
+  if (typeof window === 'undefined') return;
+  if (window.__agyThoughtEngine) return;
+
+  var L1_MAX = 2000;
+  var l1Cache = new Map();
+  var staticMap = {
+    "I'm thinking through how to approach this.": "正在梳理处理思路。",
+    "Thinking through how to approach this.": "正在梳理处理思路。",
+    "Let's think through this carefully.": "正在仔细梳理当前问题。",
+    "Let's analyze the user's request.": "正在分析用户的需求。",
+    "Analyzing the user's request.": "正在分析用户的需求。",
+    "Checking the current workspace context.": "正在检查当前工作区上下文。",
+    "Examining the current workspace context.": "正在检查当前工作区上下文。",
+    "Initiating the \\"Test Optimization\\" phase.": "正在进入测试优化阶段。",
+    "Proceeding to the testing and optimization phase.": "正在推进至测试与优化阶段。"
+  };
+  var staticMapLower = {};
+  for (var sk in staticMap) {
+    staticMapLower[sk.toLowerCase()] = staticMap[sk];
+  }
+
+  function normalize(text) {
+    return String(text || '').replace(/\\r\\n/g, '\\n').replace(/[ \\t]+/g, ' ').trim();
+  }
+
+  function hashKey(norm) {
+    var h1 = 0x811c9dc5, h2 = 0x01000193;
+    for (var i = 0; i < norm.length; i++) {
+      var ch = norm.charCodeAt(i);
+      h1 ^= ch;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 ^= (ch + i);
+      h2 = Math.imul(h2, 0x85ebca6b);
+    }
+    return 't1:' + (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0') + ':' + norm.length;
+  }
+
+  function shouldTranslate(text) {
+    var raw = normalize(text);
+    if (!raw || raw.length < 2) return false;
+    if (/^\\x60\\x60\\x60/.test(raw)) return false;
+    var plain = raw.replace(/\\x60[^\\x60\\n]+\\x60/g, ' ').replace(/https?:\\/\\/\\S+/gi, ' ').trim();
+    var enMatches = plain.match(/[A-Za-z]/g);
+    var enCount = enMatches ? enMatches.length : 0;
+    if (enCount < 3) return false;
+    var zhMatches = plain.match(/[\\u4e00-\\u9fa5]/g);
+    var zhCount = zhMatches ? zhMatches.length : 0;
+    if (zhCount > 0 && zhCount / (zhCount + enCount) > 0.3) return false;
+    return true;
+  }
+
+  function getCached(key) {
+    if (!l1Cache.has(key)) return null;
+    var val = l1Cache.get(key);
+    l1Cache.delete(key);
+    l1Cache.set(key, val);
+    return val;
+  }
+
+  function setCached(key, val) {
+    if (!key || !val) return;
+    l1Cache.delete(key);
+    l1Cache.set(key, val);
+    while (l1Cache.size > L1_MAX) {
+      var oldest = l1Cache.keys().next().value;
+      if (oldest === undefined) break;
+      l1Cache.delete(oldest);
+    }
+  }
+
+  function lookupSync(norm, key) {
+    if (staticMap[norm]) return staticMap[norm];
+    var low = norm.toLowerCase();
+    if (staticMapLower[low]) return staticMapLower[low];
+    return getCached(key);
+  }
+
+  function maskRegexMatches(para, chars, re) {
+    re.lastIndex = 0;
+    var m;
+    while ((m = re.exec(para)) !== null) {
+      var s = m.index, len = m[0].length;
+      if (len === 0) { re.lastIndex++; continue; }
+      for (var i = 0; i < len && s + i < chars.length; i++) chars[s + i] = '_';
+    }
+  }
+
+  function splitParagraph(para, parts) {
+    if (!para) return;
+    var chars = para.split('');
+    maskRegexMatches(para, chars, /\\x60[^\\x60\\n]+\\x60/g);
+    maskRegexMatches(para, chars, /https?:\\/\\/[^\\s<>)"']*[^\\s<>)"'.!?]/gi);
+    maskRegexMatches(para, chars, /[A-Za-z]:[\\\\\\/][^\\s,;:)"'<>]*[^\\s,;:)"'<>.!?]/g);
+    maskRegexMatches(para, chars, /\\b[A-Za-z0-9_-]+\\.(?:js|ts|jsx|tsx|json|jsonl|md|py|txt|vbs|ps1|bat|db|pb|pbtxt|lua|xml|sql|html|css|exe|lnk|log|yaml|yml)\\b/gi);
+    maskRegexMatches(para, chars, /\\bv?\\d+\\.\\d+(?:\\.\\d+)*\\b/g);
+    maskRegexMatches(para, chars, /\\b(?:e\\.g|i\\.e|etc|vs|Mr|Ms|Dr|Prof|Inc|Ltd|No|Fig|Sec)\\./gi);
+    var masked = chars.join('');
+
+    var start = 0;
+    for (var i = 0; i < masked.length; i++) {
+      var ch = masked[i];
+      if (ch === '\\n') {
+        if (i > start) pushSent(para.slice(start, i), parts);
+        parts.push({ kind: 'sep', text: '\\n' });
+        start = i + 1;
+        continue;
+      }
+      if (ch === '.' || ch === '!' || ch === '?') {
+        var sp = i + 1;
+        while (sp < masked.length && (masked[sp] === ' ' || masked[sp] === '\\t')) sp++;
+        if (sp > i + 1 && sp < para.length) {
+          var nextCh = para[sp];
+          if (/[A-Z0-9\\x60"'(\\[]/.test(nextCh) || nextCh.charCodeAt(0) >= 0x4e00) {
+            pushSent(para.slice(start, i + 1), parts);
+            parts.push({ kind: 'sep', text: para.slice(i + 1, sp) });
+            start = sp;
+            i = sp - 1;
+          }
+        }
+      }
+    }
+    if (start < para.length) {
+      pushSent(para.slice(start), parts);
+    }
+  }
+
+  function pushSent(rawSlice, parts) {
+    var norm = normalize(rawSlice);
+    if (!norm) {
+      if (rawSlice) parts.push({ kind: 'sep', text: rawSlice });
+      return;
+    }
+    var leadMatch = rawSlice.match(/^([ \\t]*)/);
+    var lead = leadMatch ? leadMatch[1] : '';
+    var trailMatch = rawSlice.match(/([ \\t]*)$/);
+    var trail = trailMatch ? trailMatch[1] : '';
+    if (lead) parts.push({ kind: 'sep', text: lead });
+    var core = rawSlice.slice(lead.length, rawSlice.length - trail.length);
+    var coreNorm = normalize(core);
+    var key = hashKey(coreNorm);
+    parts.push({
+      kind: 'sent',
+      text: core,
+      norm: coreNorm,
+      key: key,
+      committed: true,
+      translatable: shouldTranslate(coreNorm)
+    });
+    if (trail) parts.push({ kind: 'sep', text: trail });
+  }
+
+  function splitThoughtSegments(rawText, isStreaming) {
+    var src = String(rawText || '');
+    if (!src) return [];
+    var parts = [];
+    // 按多行代码块安全切分（奇数个三反引号视为流式未闭合代码块，跳过翻译）
+    var fence = String.fromCharCode(96, 96, 96);
+    var cursor = 0;
+    while (cursor < src.length) {
+      var openIdx = src.indexOf(fence, cursor);
+      if (openIdx === -1) {
+        splitNonCodeChunk(src.slice(cursor), parts);
+        break;
+      }
+      if (openIdx > cursor) {
+        splitNonCodeChunk(src.slice(cursor, openIdx), parts);
+      }
+      var closeIdx = src.indexOf(fence, openIdx + 3);
+      if (closeIdx === -1) {
+        parts.push({ kind: 'code', text: src.slice(openIdx), committed: false, translatable: false });
+        break;
+      }
+      parts.push({ kind: 'code', text: src.slice(openIdx, closeIdx + 3), committed: true, translatable: false });
+      cursor = closeIdx + 3;
+    }
+
+    // 标记流式未闭合尾句
+    if (isStreaming) {
+      var lastSentIdx = -1;
+      for (var k = parts.length - 1; k >= 0; k--) {
+        if (parts[k].kind === 'sent') { lastSentIdx = k; break; }
+      }
+      if (lastSentIdx !== -1) {
+        var lastPart = parts[lastSentIdx];
+        var hasTrailingSep = lastSentIdx < parts.length - 1;
+        var hasEndingPunct = /[.!?。！？]["'”’)]?$/.test(lastPart.norm);
+        if (!(hasTrailingSep && hasEndingPunct)) {
+          lastPart.committed = false;
+        }
+      }
+    }
+    return parts;
+  }
+
+  function splitNonCodeChunk(chunk, parts) {
+    var blocks = chunk.split(/(\\n{2,})/);
+    for (var i = 0; i < blocks.length; i++) {
+      var blk = blocks[i];
+      if (!blk) continue;
+      if (/^\\n{2,}$/.test(blk)) {
+        parts.push({ kind: 'sep', text: blk });
+      } else {
+        splitParagraph(blk, parts);
+      }
+    }
+  }
+
+  function composeDisplay(parts, tempTailMap) {
+    var rendered = [];
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      if (p.kind !== 'sent' || !p.translatable) {
+        rendered.push({ kind: p.kind, text: p.text, isZh: /[\\u4e00-\\u9fa5]/.test(p.text) });
+        continue;
+      }
+      var zh = lookupSync(p.norm, p.key);
+      if (!zh && !p.committed && tempTailMap && tempTailMap.has(p.key)) {
+        zh = tempTailMap.get(p.key);
+      }
+      rendered.push({ kind: 'sent', text: zh || p.text, isZh: !!zh || /[\\u4e00-\\u9fa5]/.test(p.text) });
+    }
+    var out = '';
+    for (var j = 0; j < rendered.length; j++) {
+      var cur = rendered[j];
+      if (cur.kind === 'sep' && /^[ \\t]+$/.test(cur.text)) {
+        var prev = j > 0 ? rendered[j - 1] : null;
+        var next = j + 1 < rendered.length ? rendered[j + 1] : null;
+        if (prev && next && prev.isZh && next.isZh && /[。！？；：）】]$/.test(prev.text)) {
+          continue;
+        }
+      }
+      out += cur.text;
+    }
+    return out;
+  }
+
+  async function requestBatch(items) {
+    var resp = await fetch('/translate-thought', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: items })
+    });
+    if (!resp || !resp.ok) return { ok: false, results: [] };
+    return resp.json();
+  }
+
+  window.__agyThoughtEngine = {
+    normalize: normalize,
+    hashKey: hashKey,
+    shouldTranslate: shouldTranslate,
+    lookupSync: lookupSync,
+    getCached: getCached,
+    setCached: setCached,
+    splitThoughtSegments: splitThoughtSegments,
+    composeDisplay: composeDisplay,
+    requestBatch: requestBatch
+  };
+})();
+`;
+
+code = runtimeTitleCacheInit + '\n' + thoughtEngineRuntimeScript + '\n' + domCleanerScript + '\n' + code;
 
 // 2.11 关键指纹断言（防止混淆锚点缺失导致静默失效）
 const requiredOutputMarkers = [
@@ -759,7 +1222,12 @@ const requiredOutputMarkers = [
   'label:XB({cascadeId:a.cascadeId,title:a.title,summary:a.title})',
   'a=XB({cascadeId:f,annotations:a.annotations,summary:d||a.summary})',
   'title:XB(g)||',
-  'g=XB(d)||'
+  'g=XB(d)||',
+  '__agyThoughtEngine',
+  '/translate-thought',
+  'thought-lang-toggle',
+  '思考了 ',
+  '已思考 '
 ];
 for (const marker of requiredOutputMarkers) {
   if (!code.includes(marker)) {
@@ -770,4 +1238,4 @@ for (const marker of requiredOutputMarkers) {
 // 写入目标和备份
 fs.writeFileSync(dstPath, code, 'utf8');
 fs.writeFileSync(backupDst, code, 'utf8');
-console.log('✔ 已成功编译并部署全量终极中文引擎（含实时标题自动翻译与持久化）！大小:', code.length);
+console.log('✔ 已成功编译并部署全量终极中文引擎（含标题持久化与思维链实时流式翻译）！大小:', code.length);

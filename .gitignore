@@ -6,6 +6,9 @@ hub_main_zh.js
 # 个人会话标题字典与运行时翻译缓存（含隐私，仅保留本地）
 src/title_dicts.json
 src/title_cache.json
+thought_cache.jsonl
+*.jsonl.tmp
+.cache/
 
 # 日志与临时文件
 *.log

@@ -233,6 +233,12 @@ async function runPatch() {
     fs.copyFileSync(translatorSrc, translatorDst);
     console.log(`✔ [翻译微服务] 已同步标题翻译模块: ${translatorDst}`);
   }
+  const thoughtTranslatorSrc = path.join(__dirname, 'thought_translator.js');
+  const thoughtTranslatorDst = path.join(agyExtDir, 'thought_translator.js');
+  if (fs.existsSync(thoughtTranslatorSrc)) {
+    fs.copyFileSync(thoughtTranslatorSrc, thoughtTranslatorDst);
+    console.log(`✔ [思维链微服务] 已同步思维链实时翻译模块: ${thoughtTranslatorDst}`);
+  }
   writeDeployMeta(agyExtDir, __dirname);
 
   // 5. 注入 extension.js 钩子
@@ -291,6 +297,23 @@ async function runPatch() {
     if (jkCode.includes(jkSmaTarget)) {
       jkCode = jkCode.replace(jkSmaTarget, jkSmaReplacement);
       console.log('✔ [会话标题] 已拦截 sMa 搜索项渲染函数');
+    }
+    // 同步静态汉化 jetskiAgent 侧思考耗时与过程标签（零跨域风险）
+    const jkThoughtPairs = [
+      ['n>=0?`Thinking for ${Math.max(1,n)}s`:"Thinking"', 'n>=0?`已思考 ${Math.max(1,n)} 秒`:"正在思考"'],
+      ['t?`Thought for ${Math.max(1,Number(t.seconds))}s`:"Thought Process"', 't?`思考了 ${Math.max(1,Number(t.seconds))} 秒`:"思考过程"'],
+      ['_?`Thought for ${Math.max(1,Number(_.seconds))}s`:"Thought Process"', '_?`思考了 ${Math.max(1,Number(_.seconds))} 秒`:"思考过程"'],
+      ['children:"Thinking..."', 'children:"正在思考..."']
+    ];
+    let jkThoughtHits = 0;
+    for (const [fromStr, toStr] of jkThoughtPairs) {
+      if (jkCode.includes(fromStr)) {
+        jkCode = jkCode.split(fromStr).join(toStr);
+        jkThoughtHits++;
+      }
+    }
+    if (jkThoughtHits > 0) {
+      console.log(`✔ [思维链标签] 已汉化 jetskiAgent 思考标签 (${jkThoughtHits}/${jkThoughtPairs.length} 处)`);
     }
     fs.writeFileSync(jkPath, jkCode, 'utf8');
   }

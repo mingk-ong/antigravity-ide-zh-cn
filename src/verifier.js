@@ -52,6 +52,8 @@ function runVerify() {
   const agyExtDir = path.join(appDir, 'extensions', 'agy');
   const extJsPath = path.join(agyExtDir, 'vscode', 'extension.js');
   const proxyPath = path.join(agyExtDir, 'hub_proxy.js');
+  const titleTranslatorPath = path.join(agyExtDir, 'title_translator.js');
+  const thoughtTranslatorPath = path.join(agyExtDir, 'thought_translator.js');
   const zhMainPath = path.join(agyExtDir, 'hub_main_zh.js');
 
   assert('扩展 extension.js 文件存在', fs.existsSync(extJsPath));
@@ -61,6 +63,12 @@ function runVerify() {
   }
 
   assert('Hub 透明代理模块 hub_proxy.js 存在', fs.existsSync(proxyPath));
+  if (fs.existsSync(proxyPath)) {
+    const proxyContent = fs.readFileSync(proxyPath, 'utf8');
+    assert('hub_proxy.js 包含标题与思维链翻译端点', proxyContent.includes('/translate-title') && proxyContent.includes('/translate-thought'));
+  }
+  assert('标题翻译微服务 title_translator.js 存在', fs.existsSync(titleTranslatorPath));
+  assert('思维链实时翻译微服务 thought_translator.js 存在', fs.existsSync(thoughtTranslatorPath));
   assert('汉化版前端资产 hub_main_zh.js 存在', fs.existsSync(zhMainPath));
 
   // 3. 检验 hub_main_zh.js 汉化命中
@@ -88,6 +96,13 @@ function runVerify() {
       if (zhContent.includes(kw)) matchedKeywords++;
     }
     assert('Hub 前端核心关键字汉化覆盖率', matchedKeywords === testKeywords.length, `(${matchedKeywords}/${testKeywords.length})`);
+    assert(
+      'Hub 前端思维链实时流式翻译引擎就绪',
+      zhContent.includes('__agyThoughtEngine') &&
+        zhContent.includes('/translate-thought') &&
+        zhContent.includes('思考了 ') &&
+        zhContent.includes('查看原文')
+    );
   }
 
   console.log(`\n====================================================`);
