@@ -17,11 +17,11 @@
    - 深入拦截侧边栏真实运行载体 `hub_main_zh.js` 中的 `XB(a)` 命门函数及 4 处绕过渲染点，并在根组件 `vcc` 注入 Redux 实时订阅守卫；
    - 联动本地 `14588` 代理提供 `/translate-title` 多源翻译微服务（微软必应 → 彩云小译 → 腾讯 TranSmart → 本地离线兜底），新对话生成英文标题后 1~2 秒内自动调用官方原生 `updateConversationAnnotations` RPC 永久回写本地数据库；
    - 同步联动外层 `workbench.desktop.main.js`（`yhn`）与 `jetskiAgent/main.js`（`est`/`uEn`/`sMa`）；
-   - 具备全链路实时追踪日志系统，默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义目录）；
+   - 具备全链路实时追踪日志系统，默认输出至 `%USERPROFILE%\.antigravity-zh-cn\logs\`（支持 `AGY_ZH_LOG_DIR` 自定义目录，**所有运行日志默认仅保留最近 2 次完整记录**）；
    - 详细排查历程见专题白皮书：[会话标题中文化与全链路故障排查白皮书](docs/CONVERSATION_TITLE_LOCALIZATION.md)。
 4. **思维链（`Thought for`）实时流式翻译与 JSONL 分层缓存（v1.3.0 新增）**：
    - 静态汉化 `Thought for Xs` → `思考了 X 秒`、`Thinking for Xs` → `已思考 X 秒`、`Thought Process` → `思考过程`、`Thinking...` → `正在思考...`（同步覆盖 Hub 与 `jetskiAgent`）；
-   - 前端 `iAc` 组件内置等长掩码安全断句器（规避文件名/版本号/缩写句点陷阱并保留 `\n\n\n` 段落结构），采用 **200ms 防抖批量锁定 + 超长未闭合半句临时预译不落盘 + 右上角「查看原文 / 查看译文」一键切换**；
+   - 前端 `iAc` 组件内置等长掩码安全断句器（规避文件名/版本号/缩写句点陷阱并保留 `\n\n\n` 段落结构），采用 **译文门控（未译英文绝不上屏，首波展示柔和中文占位）+ 首波 0ms 零防抖与句末标点即时锁定 + 短链译完停留 1.5s（3.5s 断网硬兜底）+ 整块悬停锁定（跨后续步骤重挂载与页面滚动推高绝不打断展开，鼠标主动移出区域 350ms 自动收起）+ 右上角小锁常驻展开开关与「查看原文 / 查看译文」一键切换**；
    - 代理微服务 `thought_translator.js` 新增 `POST /translate-thought`、`GET /thought-cache-stats`、`POST /thought-cache-clear` 路由：启用 HTTP/HTTPS Keep-Alive 连接池，优先腾讯 TranSmart 原生批量通道（连续流式 ~200–300ms），动态零冲突锚点隔离行内代码/URL/路径并防 GFM 波浪号删除线误渲染；支持通过 `AGY_ZH_THOUGHT_LLM_URL` 接入本地 Ollama 或 OpenAI 兼容轻量 LLM；
    - 缓存采用纯本地 Append-Only JSONL（默认 `%LOCALAPPDATA%\antigravity-zh-cn\cache\thought_cache.jsonl`，支持 `AGY_ZH_CACHE_DIR` 覆盖，自动避开 OneDrive），具备 **500ms 写合并、读命中 0 刷盘、崩溃残行容错、30 天按访问续命 TTL / 15,000 条 / 6 MB 惰性原子压缩与质量权重分级覆盖**。
 5. **SHA-256 校验和全量自愈同步（杜绝损坏警告）**：
@@ -29,7 +29,7 @@
 6. **V8 字节码与缓存自动清理**：
    - 每次打补丁时自动安全清理 `%APPDATA%\Antigravity IDE\CachedData` 下的历史字节码缓存，彻底防止 Electron 加载旧代码。
 7. **全方位检验与审计日志**：
-   - 内置自动化验证套件：`run-verify.bat`（`src/verifier.js`）、`verify_all_14_screens.js`（53 项设置页验收）、`verify_title_localization.js`（15 项标题自动化验收）与 `verify_thought_localization.js`（12 项思维链流式与 JSONL 缓存验收）。
+   - 内置自动化验证套件：`run-verify.bat`（`src/verifier.js` 全链路生效与零漂移综合审查）、`verify_all_14_screens.js`（53 项设置页验收）、`verify_title_localization.js`（15 项标题自动化验收）与 `verify_thought_localization.js`（15 项思维链流式、JSONL 缓存、18 项更新适配探针、跨版本安全备份与日志保留验收）。
 
 ---
 

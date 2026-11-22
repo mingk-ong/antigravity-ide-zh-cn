@@ -43,6 +43,62 @@ try {
   } catch (_e) {}
 }
 
+/**
+ * 代理运行日志按启动次数留存裁剪（严格保留最近 2 次运行会话）
+ * - 代理每次启动写入首行前调用 keepExistingRuns = 1，写入本次后文件内仅留最近 2 次运行日志
+ */
+function pruneProxyLogKeepLastRuns(targetLogFile, keepExistingRuns = 1, maxBytes = 1024 * 1024) {
+  if (!targetLogFile || !fs.existsSync(targetLogFile)) {
+    return { purgedRuns: 0, keptRuns: 0, trimmed: false };
+  }
+  try {
+    const raw = fs.readFileSync(targetLogFile, 'utf8');
+    if (!raw.trim()) return { purgedRuns: 0, keptRuns: 0, trimmed: false };
+
+    const sessionRe = /^\[[^\]]+\] \[Proxy\] initProxy starting/gm;
+    const starts = [];
+    let match;
+    while ((match = sessionRe.exec(raw)) !== null) {
+      starts.push(match.index);
+    }
+
+    let keptContent = '';
+    let purgedRuns = 0;
+    let keptRuns = 0;
+
+    if (starts.length > 0) {
+      const blocks = [];
+      for (let i = 0; i < starts.length; i++) {
+        const end = i + 1 < starts.length ? starts[i + 1] : raw.length;
+        const blk = raw.slice(starts[i], end).trim();
+        if (blk) blocks.push(blk);
+      }
+      const maxKeep = Math.max(0, keepExistingRuns);
+      if (blocks.length > maxKeep) {
+        purgedRuns = blocks.length - maxKeep;
+      }
+      const keptBlocks = maxKeep > 0 ? blocks.slice(-maxKeep) : [];
+      keptRuns = keptBlocks.length;
+      keptContent = keptBlocks.join('\n');
+    } else if (keepExistingRuns > 0) {
+      // 无标准启动头的历史零散日志，只保留末尾最多 100 行作为上一次记录兜底
+      keptContent = raw.trim().split(/\r?\n/).slice(-100).join('\n');
+      keptRuns = keptContent ? 1 : 0;
+    }
+
+    let trimmed = false;
+    if (keptContent && Buffer.byteLength(keptContent, 'utf8') > maxBytes) {
+      keptContent = keptContent.split(/\r?\n/).slice(-1500).join('\n');
+      trimmed = true;
+    }
+
+    fs.writeFileSync(targetLogFile, keptContent ? keptContent.trim() + '\n' : '', 'utf8');
+    return { purgedRuns, keptRuns, trimmed };
+  } catch (e) {
+    return { purgedRuns: 0, keptRuns: 0, trimmed: false, error: e.message };
+  }
+}
+
 function log(msg) {
   try {
     if (fs.existsSync(logFile)) {
@@ -179,6 +235,8 @@ async function handleTranslateTitleRequest(req, res, url) {
 function initProxy() {
   if (proxyServer) return;
 
+  // 启动前先裁剪旧会话，仅保留最近 1 次历史运行（加上本次共严格保留最近 2 次）
+  pruneProxyLogKeepLastRuns(logFile, 1);
   log('[Proxy] initProxy starting on preferred port: ' + PREFERRED_PROXY_PORT);
 
   proxyServer = http.createServer((req, res) => {
@@ -371,5 +429,6 @@ module.exports = {
   getTargetPort: () => targetPort,
   getProxyPort: () => proxyPort,
   handleTranslateTitleRequest,
-  handleTranslateThoughtRequest
+  handleTranslateThoughtRequest,
+  pruneProxyLogKeepLastRuns
 };

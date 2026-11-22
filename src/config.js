@@ -1,6 +1,26 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+
+/**
+ * 计算 VS Code 规范的 SHA-256 Base64 校验和（去除末尾等号）
+ */
+function computeChecksum(contentBuffer) {
+  return crypto.createHash('sha256').update(contentBuffer).digest('base64').replace(/=+$/, '');
+}
+
+/**
+ * 计算文件内容的 SHA-256 Hex 摘要（用于精准比对官方源与补丁模板版本漂移）
+ */
+function computeFileSha256(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return '';
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  } catch (_e) {
+    return '';
+  }
+}
 
 /**
  * 获取统一日志目录（支持环境变量 AGY_ZH_LOG_DIR 覆盖）
@@ -49,11 +69,27 @@ function getMetaFilePath(agyExtDir) {
 }
 
 /**
- * 将当前机器的源码目录、日志目录与纯本地缓存目录写入扩展目录元数据（仅本机使用，不入库）
+ * 读取扩展目录的部署元数据（不存在或解析失败返回 null）
  */
-function writeDeployMeta(agyExtDir, patchSrcDir) {
+function readDeployMeta(agyExtDir) {
+  const metaPath = getMetaFilePath(agyExtDir);
+  if (!fs.existsSync(metaPath)) return null;
   try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * 将当前机器的源码目录、日志目录、纯本地缓存目录与版本哈希元数据写入扩展目录（仅本机使用，不入库）
+ */
+function writeDeployMeta(agyExtDir, patchSrcDir, extraMeta = {}) {
+  try {
+    const existing = readDeployMeta(agyExtDir) || {};
     const meta = {
+      ...existing,
+      ...extraMeta,
       patchSrcDir: path.resolve(patchSrcDir),
       logDir: getLogDir(),
       cacheDir: getCacheDir(),
@@ -126,10 +162,13 @@ function getTargetPaths() {
 }
 
 module.exports = {
+  computeChecksum,
+  computeFileSha256,
   getTargetPaths,
   getLogDir,
   getCacheDir,
   getLogFile,
   getMetaFilePath,
+  readDeployMeta,
   writeDeployMeta
 };

@@ -1,34 +1,66 @@
 /**
  * Antigravity IDE 智能自愈与更新自适应检测引擎 (Auto-Updater & Self-Healing Engine)
- * 
+ *
  * 核心特性：
- * 1. 深度多维健康检查：逐项输出 5 大核心模块、11 项完整性校验和的精确状态
- * 2. 8 大特征指纹精准探针：详尽记录新版本代码特征匹配偏移与上下文
- * 3. 自动化自愈流水线：自动同步新版资产、重编译中文引擎、修复校验和
- * 4. 零破坏安全防御：遇到不兼容版本自动拦截，输出全面诊断分析与排查建议
- * 5. 智能日志生命周期管理：按 7 天周期自销毁过期日志，超过 500KB 自动裁剪
+ * 1. 深度多维健康检查：覆盖 7 大维度（扩展钩子、代理与双翻译微服务模板一致性、hub_main_zh.js 完整特性指纹、
+ *    官方 hub_main.js 与构建引擎哈希漂移、外层 workbench/jetskiAgent/package.json 注入态、元数据与 product.json 全量签名）
+ * 2. 分层特征指纹兼容探针：18 项主引擎必选核心锚点（含 iAc 内部耦合符号组与 extension.js）+ 外围增强锚点分级评估
+ * 3. 统一无损自愈流水线：直接复用 core_injector.applyAllPatches，与手动 patcher.js 100% 同步无漏项，内置跨版本 .bak 防污染保护
+ * 4. 零破坏安全防御：遇到不兼容版本坚决熔断，保持官方原版启动并输出详尽诊断报告
+ * 5. 智能日志生命周期管理：仅保留最近 2 次完整运行记录，单次超 500KB 自动体积兜底裁剪
  * 6. 零黑框静默拉起 IDE 主程序，全透传命令行参数
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const crypto = require('crypto');
-const { execSync, spawn } = require('child_process');
-const { getTargetPaths, getLogDir, writeDeployMeta } = require('./config');
+const { spawn } = require('child_process');
+const {
+  computeChecksum,
+  computeFileSha256,
+  getTargetPaths,
+  getLogDir,
+  readDeployMeta
+} = require('./config');
+const {
+  PROXY_REQUIRED_ENDPOINTS,
+  THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
+  HUB_ZH_THOUGHT_FEATURE_MARKERS,
+  HUB_ZH_TITLE_FEATURE_MARKERS,
+  EXTENSION_HOOK_MARKER,
+  EXTENSION_HOOK_TARGET,
+  WORKBENCH_YHN_TARGET,
+  JETSKI_EST_TARGET,
+  JETSKI_UEN_TARGET,
+  JETSKI_SMA_TARGET,
+  JETSKI_THOUGHT_PAIRS,
+  isAgyPackageLocalized,
+  isWorkbenchPatched,
+  isJetskiPatched,
+  filesAreIdentical,
+  resolveHubSourcePath,
+  readInstalledAppIdentity,
+  applyAllPatches
+} = require('./core_injector');
 
 // 路径与常量配置（动态探测，零硬编码）
-const { installDir: APP_DIR } = getTargetPaths();
+const {
+  installDir: APP_DIR,
+  appDir: RESOURCES_APP,
+  agyExtDir: EXT_DIR,
+  agyExtPackagePath: EXT_PACKAGE_JSON,
+  productJsonPath: PRODUCT_JSON
+} = getTargetPaths();
 const PATCH_DIR = path.resolve(__dirname, '..');
 const DEFAULT_LOG_DIR = getLogDir();
 const LOG_FILE = path.join(DEFAULT_LOG_DIR, 'antigravity_auto_patch.log');
 const IDE_EXE = path.join(APP_DIR, 'Antigravity IDE.exe');
 
 // 关键系统文件
-const RESOURCES_APP = path.join(APP_DIR, 'resources', 'app');
-const PRODUCT_JSON = path.join(RESOURCES_APP, 'product.json');
 const PACKAGE_JSON = path.join(RESOURCES_APP, 'package.json');
-const EXT_DIR = path.join(RESOURCES_APP, 'extensions', 'agy');
+const OUT_DIR = path.join(RESOURCES_APP, 'out');
+const WORKBENCH_JS = path.join(OUT_DIR, 'vs', 'workbench', 'workbench.desktop.main.js');
+const JETSKI_JS = path.join(OUT_DIR, 'jetskiAgent', 'main.js');
 const EXT_JS = path.join(EXT_DIR, 'vscode', 'extension.js');
 const PROXY_JS = path.join(EXT_DIR, 'hub_proxy.js');
 const TRANSLATOR_JS = path.join(EXT_DIR, 'title_translator.js');
@@ -36,10 +68,10 @@ const THOUGHT_TRANSLATOR_JS = path.join(EXT_DIR, 'thought_translator.js');
 const ZH_MAIN_JS = path.join(EXT_DIR, 'hub_main_zh.js');
 const LIVE_HUB_MAIN = path.join(EXT_DIR, 'hub_main.js');
 const SRC_HUB_MAIN = path.join(PATCH_DIR, 'hub_main.js');
-
-function computeChecksum(contentBuffer) {
-  return crypto.createHash('sha256').update(contentBuffer).digest('base64').replace(/=+$/, '');
-}
+const BUILD_ENGINE_JS = path.join(PATCH_DIR, 'build_ultimate_chinese_engine.js');
+const SRC_PROXY_JS = path.join(PATCH_DIR, 'src', 'hub_proxy.template.js');
+const SRC_TRANSLATOR_JS = path.join(PATCH_DIR, 'src', 'title_translator.js');
+const SRC_THOUGHT_TRANSLATOR_JS = path.join(PATCH_DIR, 'src', 'thought_translator.js');
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -48,49 +80,58 @@ function formatBytes(bytes) {
 }
 
 /**
- * 日志自更新与过期自销毁管理器 (Auto-Purge & Retention Manager)
+ * 日志按运行次数精准留存管理器（严格保留最近 2 次运行日志）
+ * - 写入本次新日志前调用 keepExistingRuns = 1，写完本次后文件内恰好保留最近 2 次完整运行记录
+ * - 若单次极端体积超过 maxBytes，额外执行尾部行保护
  */
-function purgeExpiredLogs(logPath, retentionDays = 7, maxBytes = 500 * 1024) {
-  if (!fs.existsSync(logPath)) return { purgedCount: 0, trimmed: false };
+function pruneLogKeepLastRuns(logPath, keepExistingRuns = 1, maxBytes = 500 * 1024) {
+  if (!fs.existsSync(logPath)) return { purgedRuns: 0, keptRuns: 0, trimmed: false };
   try {
     const raw = fs.readFileSync(logPath, 'utf8');
-    if (!raw.trim()) return { purgedCount: 0, trimmed: false };
+    if (!raw.trim()) return { purgedRuns: 0, keptRuns: 0, trimmed: false };
 
-    const now = Date.now();
-    const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
-    const lines = raw.split('\n');
-    const validLines = [];
-    let purgedCount = 0;
+    const headerRe = /^={10,}\r?\n【启动自检与全景监控日志】/gm;
+    const starts = [];
+    let match;
+    while ((match = headerRe.exec(raw)) !== null) {
+      starts.push(match.index);
+    }
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const match = line.match(/^\[(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\]/);
-      if (match) {
-        const timeVal = Date.parse(`${match[1]}T${match[2]}`);
-        if (!isNaN(timeVal)) {
-          if (now - timeVal > maxAgeMs) {
-            purgedCount++;
-            continue;
-          }
-        }
+    let keptContent = raw;
+    let purgedRuns = 0;
+    let keptRuns = 0;
+
+    if (starts.length > 0) {
+      const blocks = [];
+      for (let i = 0; i < starts.length; i++) {
+        const end = i + 1 < starts.length ? starts[i + 1] : raw.length;
+        const blk = raw.slice(starts[i], end).trim();
+        if (blk) blocks.push(blk);
       }
-      validLines.push(line);
+      const maxKeep = Math.max(0, keepExistingRuns);
+      if (blocks.length > maxKeep) {
+        purgedRuns = blocks.length - maxKeep;
+      }
+      const keptBlocks = maxKeep > 0 ? blocks.slice(-maxKeep) : [];
+      keptRuns = keptBlocks.length;
+      keptContent = keptBlocks.join('\n\n');
+    } else if (keepExistingRuns <= 0) {
+      keptContent = '';
     }
 
     let trimmed = false;
-    let finalContent = validLines.join('\n');
-    if (Buffer.byteLength(finalContent, 'utf8') > maxBytes) {
-      const trimmedLines = validLines.slice(-600);
+    if (keptContent && Buffer.byteLength(keptContent, 'utf8') > maxBytes) {
+      const trimmedLines = keptContent.split(/\r?\n/).slice(-600);
       const timeStr = new Date().toLocaleString('zh-CN', { hour12: false });
-      trimmedLines.unshift(`[${timeStr}] 【系统自维护】日志体积超过容量保护阈值（>500KB），已自动归档裁剪早期记录，保留最新 600 行详细日志。\n`);
-      finalContent = trimmedLines.join('\n');
+      trimmedLines.unshift(`[${timeStr}] 【系统自维护】单次日志体积超过容量保护阈值（>500KB），已自动安全裁剪早期明细，保留最新 600 行。\n`);
+      keptContent = trimmedLines.join('\n');
       trimmed = true;
     }
 
-    fs.writeFileSync(logPath, finalContent.trim() + '\n', 'utf8');
-    return { purgedCount, trimmed };
+    fs.writeFileSync(logPath, keptContent ? keptContent.trim() + '\n\n' : '', 'utf8');
+    return { purgedRuns, keptRuns, trimmed };
   } catch (e) {
-    return { purgedCount: 0, trimmed: false, error: e.message };
+    return { purgedRuns: 0, keptRuns: 0, trimmed: false, error: e.message };
   }
 }
 
@@ -102,7 +143,7 @@ function writeLog(text) {
 }
 
 /**
- * 深度多维健康检查 (Deep Diagnostics Inspection)
+ * 阶段一：深度多维健康检查 (7 大核心维度)
  */
 function inspectHealthDeeply() {
   const report = {
@@ -111,21 +152,27 @@ function inspectHealthDeeply() {
     details: {}
   };
 
-  // 1. 检查扩展 extension.js
+  // 1. 检查扩展 extension.js 与 agy/package.json
   if (fs.existsSync(EXT_JS)) {
     const stat = fs.statSync(EXT_JS);
     const content = fs.readFileSync(EXT_JS, 'utf8');
-    const hasProxyHook = content.includes('redirectIframeUrl') && content.includes('hub_proxy');
+    const hasProxyHook = content.includes(EXTENSION_HOOK_MARKER) && content.includes('hub_proxy');
+    const pkgLocalized = fs.existsSync(EXT_PACKAGE_JSON) && isAgyPackageLocalized(fs.readFileSync(EXT_PACKAGE_JSON, 'utf8'));
     report.details.extension = {
       path: EXT_JS,
       size: formatBytes(stat.size),
       mtime: stat.mtime.toLocaleString('zh-CN', { hour12: false }),
       hookStatus: hasProxyHook ? '已挂载 (正常)' : '未挂载 (缺失)',
-      ok: hasProxyHook
+      pkgStatus: pkgLocalized ? '命令已汉化' : '命令未汉化',
+      ok: hasProxyHook && pkgLocalized
     };
     if (!hasProxyHook) {
       report.valid = false;
       report.failures.push('extension.js 缺少 Webview 代理重定向钩子（官方更新已覆盖此文件）');
+    }
+    if (!pkgLocalized) {
+      report.valid = false;
+      report.failures.push('extensions/agy/package.json 扩展命令汉化缺失或被官方更新覆盖');
     }
   } else {
     report.valid = false;
@@ -133,26 +180,50 @@ function inspectHealthDeeply() {
     report.details.extension = { ok: false, error: '文件不存在' };
   }
 
-  // 2. 检查反向代理 hub_proxy.js 与标题/思维链翻译微服务
+  // 2. 检查透明代理 hub_proxy.js、双翻译微服务与源码模板一致性及部署元数据
+  const meta = readDeployMeta(EXT_DIR);
+  const metaOk = Boolean(meta && meta.patchSrcDir && meta.logDir && meta.cacheDir);
   if (fs.existsSync(PROXY_JS) && fs.existsSync(TRANSLATOR_JS) && fs.existsSync(THOUGHT_TRANSLATOR_JS)) {
     const stat = fs.statSync(PROXY_JS);
-    const content = fs.readFileSync(PROXY_JS, 'utf8');
-    const hasFixedPort = content.includes('14588');
-    const hasTranslateEndpoint = content.includes('/translate-title');
-    const hasThoughtEndpoint = content.includes('/translate-thought');
-    const endpointsOk = hasTranslateEndpoint && hasThoughtEndpoint;
+    const proxyContent = fs.readFileSync(PROXY_JS, 'utf8');
+    const thoughtContent = fs.readFileSync(THOUGHT_TRANSLATOR_JS, 'utf8');
+    const hasFixedPort = proxyContent.includes('14588');
+    const missingEndpoints = PROXY_REQUIRED_ENDPOINTS.filter(ep => !proxyContent.includes(ep));
+    const missingThoughtMarkers = THOUGHT_TRANSLATOR_REQUIRED_MARKERS.filter(m => !thoughtContent.includes(m));
+    const proxySynced = !fs.existsSync(SRC_PROXY_JS) || filesAreIdentical(SRC_PROXY_JS, PROXY_JS);
+    const titleSynced = !fs.existsSync(SRC_TRANSLATOR_JS) || filesAreIdentical(SRC_TRANSLATOR_JS, TRANSLATOR_JS);
+    const thoughtSynced = !fs.existsSync(SRC_THOUGHT_TRANSLATOR_JS) || filesAreIdentical(SRC_THOUGHT_TRANSLATOR_JS, THOUGHT_TRANSLATOR_JS);
+
+    const proxyAllOk = missingEndpoints.length === 0 && missingThoughtMarkers.length === 0 && proxySynced && titleSynced && thoughtSynced && metaOk;
+
     report.details.proxy = {
       path: PROXY_JS,
       size: formatBytes(stat.size),
       port: hasFixedPort ? '固定高位端口 14588 (消除时序竞争)' : '动态端口',
-      translateEndpoint: endpointsOk
-        ? '已启用 /translate-title 与 /translate-thought 双微服务'
-        : '缺少标题或思维链翻译端点',
-      ok: endpointsOk
+      translateEndpoint:
+        missingEndpoints.length === 0
+          ? `已启用全部 ${PROXY_REQUIRED_ENDPOINTS.length} 项标题与思维链微服务端点`
+          : `缺少端点: ${missingEndpoints.join(', ')}`,
+      syncStatus: proxySynced && titleSynced && thoughtSynced ? '与源码 100% 同步' : '检测到源码已更新（待同步）',
+      metaStatus: metaOk ? '元数据与纯本地缓存配置就绪' : '缺少 .agy_zh_meta.json',
+      ok: proxyAllOk
     };
-    if (!endpointsOk) {
+
+    if (missingEndpoints.length > 0) {
       report.valid = false;
-      report.failures.push('hub_proxy.js 缺少 /translate-title 或 /translate-thought 实时翻译端点（需升级代理模板）');
+      report.failures.push(`hub_proxy.js 缺少必要微服务端点: ${missingEndpoints.join(', ')}`);
+    }
+    if (missingThoughtMarkers.length > 0) {
+      report.valid = false;
+      report.failures.push(`thought_translator.js 版本过旧，缺少特性: ${missingThoughtMarkers.join(', ')}`);
+    }
+    if (!proxySynced || !titleSynced || !thoughtSynced) {
+      report.valid = false;
+      report.failures.push('本地代理或翻译微服务源码已升级，与已部署副本不一致（需自动同步）');
+    }
+    if (!metaOk) {
+      report.valid = false;
+      report.failures.push('扩展目录缺少有效部署元数据 .agy_zh_meta.json');
     }
   } else {
     const missingDesc = !fs.existsSync(PROXY_JS)
@@ -165,26 +236,36 @@ function inspectHealthDeeply() {
     report.details.proxy = { ok: false, error: missingDesc };
   }
 
-  // 3. 检查汉化核心 hub_main_zh.js
+  // 3. 检查汉化核心 hub_main_zh.js（含最新直出中文门控、防打断悬停与小锁特性指纹）
   if (fs.existsSync(ZH_MAIN_JS)) {
     const stat = fs.statSync(ZH_MAIN_JS);
     const content = fs.readFileSync(ZH_MAIN_JS, 'utf8');
-    
-    // 探测核心引擎注入特征
+
     const hasSt = content.includes('_wrapMap(new Map');
     const hasUt = content.includes('_titles =') && content.includes('通用设置');
     const hasYt = content.includes('_secTitles =') && content.includes('自定义扩展与技能');
     const hasXt = content.includes('_labels =') && content.includes('权限预设模板');
     const hasDomCleaner = content.includes('Antigravity 全局自适应运行时 DOM 清洗引擎');
-    const hasTitleEngine = content.includes('XB') &&
-      content.includes('软件界面中文化设置') &&
-      content.includes('__agyTitleAutoLocalizer') &&
-      content.includes('updateConversationAnnotations');
-    const hasThoughtEngine = content.includes('__agyThoughtEngine') &&
-      content.includes('/translate-thought') &&
-      content.includes('思考了 ');
+    const hasTitleEngine = HUB_ZH_TITLE_FEATURE_MARKERS.every(m => content.includes(m));
+    const missingThoughtFeatures = HUB_ZH_THOUGHT_FEATURE_MARKERS.filter(m => !content.includes(m));
+    const hasThoughtEngine = missingThoughtFeatures.length === 0;
 
-    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine;
+    // 检查版本漂移：官方 IDE 版本/distro、hub_main.js 源或本地构建引擎是否已变更
+    const hubSourcePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
+    const hubSourceSha = computeFileSha256(hubSourcePath);
+    const buildEngineSha = computeFileSha256(BUILD_ENGINE_JS);
+    const { appVersion: curAppVersion, distro: curDistro } = readInstalledAppIdentity(RESOURCES_APP);
+    const appIdentityDrifted = Boolean(
+      meta &&
+        ((curAppVersion && meta.appVersion && meta.appVersion !== curAppVersion) ||
+          (curDistro && meta.distro && meta.distro !== curDistro))
+    );
+    const hubSourceDrifted = Boolean(hubSourceSha && meta && meta.hubSourceSha256 && meta.hubSourceSha256 !== hubSourceSha);
+    const buildEngineDrifted = Boolean(buildEngineSha && meta && meta.buildEngineSha256 && meta.buildEngineSha256 !== buildEngineSha);
+    const hubMetaMissingHash = Boolean(!meta || !meta.hubSourceSha256 || !meta.buildEngineSha256 || (curDistro && !meta.distro));
+    const noDrift = !appIdentityDrifted && !hubSourceDrifted && !buildEngineDrifted && !hubMetaMissingHash;
+
+    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine && noDrift;
 
     report.details.zhBundle = {
       path: ZH_MAIN_JS,
@@ -196,14 +277,40 @@ function inspectHealthDeeply() {
         yT_分区折叠面板: hasYt ? '✔ 注入正常' : '❌ 缺失',
         xT_设置卡片行: hasXt ? '✔ 注入正常' : '❌ 缺失',
         XB_会话标题枢纽: hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
-        iAc_思维链流式翻译: hasThoughtEngine ? '✔ 实时流式翻译与缓存就绪' : '❌ 缺失/版本过旧',
+        iAc_思维链流式翻译: hasThoughtEngine ? '✔ 直出门控/悬停防打断/小锁全就绪' : `❌ 缺失 (${missingThoughtFeatures.slice(0, 3).join(', ')})`,
         DOM_运行时清洗器: hasDomCleaner ? '✔ 挂载正常' : '❌ 缺失'
       },
+      driftStatus: appIdentityDrifted
+        ? `检测到 IDE 版本变化 (${meta.appVersion}/${String(meta.distro || '').slice(0, 8)} -> ${curAppVersion}/${String(curDistro || '').slice(0, 8)})`
+        : hubSourceDrifted
+          ? 'hub_main.js 源码已更新（待重编）'
+          : buildEngineDrifted
+            ? '构建引擎源码已更新（待重编）'
+            : hubMetaMissingHash
+              ? '版本基准哈希待建立'
+              : '与当前客户端版本、源资产及构建脚本零漂移',
       ok: allEnginesOk
     };
-    if (!allEnginesOk) {
+    if (!hasSt || !hasUt || !hasYt || !hasXt || !hasDomCleaner || !hasTitleEngine) {
       report.valid = false;
-      report.failures.push('hub_main_zh.js 汉化引擎、标题守卫或思维链实时翻译指纹不完整');
+      report.failures.push('hub_main_zh.js 汉化引擎或会话标题守卫指纹不完整');
+    }
+    if (!hasThoughtEngine) {
+      report.valid = false;
+      report.failures.push(`hub_main_zh.js 思维链特性版本过旧，缺少: ${missingThoughtFeatures.join(', ')}`);
+    }
+    if (appIdentityDrifted) {
+      report.valid = false;
+      report.failures.push(`检测到 Antigravity IDE 版本或 Distro 变化 (${meta.appVersion} -> ${curAppVersion})，需重新验证并自愈注入`);
+    } else if (hubSourceDrifted) {
+      report.valid = false;
+      report.failures.push('检测到 hub_main.js 源资产发生变更（与已编译 hub_main_zh.js 基准哈希不一致，需自动重编）');
+    } else if (buildEngineDrifted) {
+      report.valid = false;
+      report.failures.push('检测到本地 build_ultimate_chinese_engine.js 已更新（需重新编译部署 hub_main_zh.js）');
+    } else if (hubMetaMissingHash) {
+      report.valid = false;
+      report.failures.push('部署元数据缺少 hub_main.js/构建脚本/Distro 基准指纹（需自愈对齐一次）');
     }
   } else {
     report.valid = false;
@@ -211,7 +318,26 @@ function inspectHealthDeeply() {
     report.details.zhBundle = { ok: false, error: '文件不存在' };
   }
 
-  // 4. 检查官方原始 bundle
+  // 4. 检查外层工作台 (workbench) 与独立智能体弹窗 (jetskiAgent) 实际注入状态
+  const wbExists = fs.existsSync(WORKBENCH_JS);
+  const wbOk = wbExists && isWorkbenchPatched(fs.readFileSync(WORKBENCH_JS, 'utf8'));
+  const jkExists = fs.existsSync(JETSKI_JS);
+  const jkOk = jkExists && isJetskiPatched(fs.readFileSync(JETSKI_JS, 'utf8'));
+  report.details.outerBundles = {
+    workbench: wbExists ? (wbOk ? '✔ yhn 标题枢纽已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
+    jetskiAgent: jkExists ? (jkOk ? '✔ est 标题与思考标签已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
+    ok: wbOk && jkOk
+  };
+  if (wbExists && !wbOk) {
+    report.valid = false;
+    report.failures.push('workbench.desktop.main.js 会话标题枢纽 yhn(t) 未注入或已被官方更新覆写');
+  }
+  if (jkExists && !jkOk) {
+    report.valid = false;
+    report.failures.push('jetskiAgent/main.js 标题枢纽或思考标签汉化未注入/已被官方更新覆写');
+  }
+
+  // 5. 检查官方原始 bundle
   if (fs.existsSync(LIVE_HUB_MAIN)) {
     const stat = fs.statSync(LIVE_HUB_MAIN);
     report.details.liveBundle = {
@@ -224,7 +350,7 @@ function inspectHealthDeeply() {
     report.details.liveBundle = { ok: false, error: '文件不存在' };
   }
 
-  // 5. 检查 product.json 完整性签名
+  // 6. 检查 product.json 完整性签名
   if (fs.existsSync(PRODUCT_JSON)) {
     try {
       const prodJson = JSON.parse(fs.readFileSync(PRODUCT_JSON, 'utf8'));
@@ -236,7 +362,7 @@ function inspectHealthDeeply() {
 
         for (const relPath in prodJson.checksums) {
           total++;
-          const fullPath = path.join(RESOURCES_APP, 'out', relPath);
+          const fullPath = path.join(OUT_DIR, relPath);
           if (fs.existsSync(fullPath)) {
             const curHash = computeChecksum(fs.readFileSync(fullPath));
             const expectedHash = prodJson.checksums[relPath];
@@ -256,7 +382,7 @@ function inspectHealthDeeply() {
           }
         }
 
-        const isIntegrityPure = (matched === total);
+        const isIntegrityPure = matched === total;
         report.details.integrity = {
           total,
           matched,
@@ -285,20 +411,29 @@ function inspectHealthDeeply() {
 }
 
 /**
- * 阶段二：新版本特征指纹兼容性探针 (10大核心锚点)
+ * 阶段二：分层新版本特征指纹兼容性探针
+ * - 必选核心锚点（18 项，含 hub_main.js 17 项 + extension.js 1 项）：任一缺失即坚决熔断保护，防止白屏
+ * - 外围增强锚点（workbench / jetskiAgent）：分级记录诊断，不阻断主引擎自愈
  */
-function probeVersionCompatibility(targetHubMainPath) {
+function probeVersionCompatibility(targetHubMainPath, opts = {}) {
+  const extJsPath = opts.extJsPath || EXT_JS;
+  const wbPath = opts.wbPath || WORKBENCH_JS;
+  const jkPath = opts.jkPath || JETSKI_JS;
+
   if (!fs.existsSync(targetHubMainPath)) {
     return {
       compatible: false,
-      missingAnchors: ['hub_main.js 不存在'],
+      matchedAnchors: [],
+      missingAnchors: [{ id: 'hub_main', name: '官方静态源 hub_main.js', pattern: targetHubMainPath }],
+      optionalAnchors: [],
+      codeLength: 0,
       details: `在路径 ${targetHubMainPath} 未找到官方前端 bundle 文件。`
     };
   }
 
   const code = fs.readFileSync(targetHubMainPath, 'utf8');
 
-  const requiredAnchors = [
+  const requiredHubAnchors = [
     {
       id: 'vT',
       name: '侧边栏与路由映射函数 (vT)',
@@ -348,140 +483,174 @@ function probeVersionCompatibility(targetHubMainPath) {
       desc: '侧边栏与检索面板输出会话标题的最底层终极拦截点'
     },
     {
+      id: 'bypass_search',
+      name: '会话标题绕过点 1：搜索结果列表项',
+      pattern: 'label:a.title||"Untitled Conversation"',
+      desc: '封堵全局检索结果绕过 XB 的渲染入口'
+    },
+    {
+      id: 'bypass_active',
+      name: '会话标题绕过点 2：活跃会话索引 ($2a)',
+      pattern: 'a=a.annotations?.title||d||`Conversation ${f.slice(0,8)}`',
+      desc: '封堵活跃对话列表绕过 XB 的渲染入口'
+    },
+    {
+      id: 'bypass_parent',
+      name: '会话标题绕过点 3：父级追溯链路 (OYc)',
+      pattern: 'title:g?.annotations?.title?.trim()||g?.summary||"Parent Conversation"',
+      desc: '封堵子对话回溯父对话绕过 XB 的渲染入口'
+    },
+    {
+      id: 'bypass_scope',
+      name: '会话标题绕过点 4：上下文引用作用域条目',
+      pattern: 'g=d.annotations?.title?.trim()||g;',
+      desc: '封堵上下文引用标题绕过 XB 的渲染入口'
+    },
+    {
       id: 'vcc',
       name: 'Hub 对话注释与状态挂载组件 (vcc)',
       pattern: 'var vcc=()=>{var a=SO(),b=Xk(),c=ZP(),d=xQ(),{updateConversationAnnotations:f}=PB(),g=tC(),h=wQ();',
       desc: '负责挂载 Redux 状态订阅及官方原生 updateConversationAnnotations RPC 持久化守卫'
     },
     {
-      id: 'iAc',
-      name: '思维链思考过程渲染组件 (iAc)',
+      id: 'hAc',
+      name: '思维链计时头部动画文案 (hAc)',
+      pattern: 'd>=0?`Thinking for ${Math.max(1,d)}s`:"Thinking"',
+      desc: '负责汉化思考中实时计时器头部文案'
+    },
+    {
+      id: 'iAc_start',
+      name: '思维链渲染组件起点 (iAc)',
       pattern: 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{',
-      desc: '负责渲染 Thought for 折叠面板及流式思维链实时翻译与原文/译文切换'
+      desc: '负责渲染 Thought for 折叠面板及流式思维链实时翻译、防打断悬停与小锁交互'
     }
   ];
 
   const matchedAnchors = [];
   const missingAnchors = [];
 
-  for (const anchor of requiredAnchors) {
+  for (const anchor of requiredHubAnchors) {
     const idx = code.indexOf(anchor.pattern);
     if (idx !== -1) {
-      matchedAnchors.push({
-        ...anchor,
-        offset: idx
-      });
+      matchedAnchors.push({ ...anchor, offset: idx });
     } else {
       missingAnchors.push(anchor);
     }
   }
 
-  const isCompatible = (missingAnchors.length === 0);
+  // 必选锚点 16：iAc 结尾定界符 (;var jAc= 必须在 iAc 起点之后)
+  const iacStartAnchor = matchedAnchors.find(a => a.id === 'iAc_start');
+  const iacStartIdx = iacStartAnchor ? iacStartAnchor.offset : -1;
+  const iacEndIdx = iacStartIdx !== -1 ? code.indexOf(';var jAc=', iacStartIdx) : -1;
+  const iacEndAnchor = {
+    id: 'iAc_end',
+    name: '思维链渲染组件定界终点 (;var jAc=)',
+    pattern: ';var jAc='
+  };
+  if (iacEndIdx !== -1) {
+    matchedAnchors.push({ ...iacEndAnchor, offset: iacEndIdx });
+  } else {
+    missingAnchors.push(iacEndAnchor);
+  }
+
+  // 必选锚点 17：iAc 内部强耦合外部混淆符号组（防止新版换符号名导致注入后运行时报错白屏）
+  const iacCoupledSymbols = [
+    'tI()',
+    'd5b()',
+    'J.CascadeRunStatus.RUNNING',
+    'J.CortexStepStatus.RUNNING',
+    'J.CortexStepStatus.GENERATING',
+    'Fj()',
+    'pqc()',
+    'D.createElement(uY',
+    'D.createElement(n2',
+    'D.createElement(hAc'
+  ];
+  const iacBody = iacStartIdx !== -1 && iacEndIdx !== -1 ? code.slice(iacStartIdx, iacEndIdx + 1) : '';
+  const missingCoupled = iacBody ? iacCoupledSymbols.filter(sym => !iacBody.includes(sym)) : iacCoupledSymbols;
+  const coupledAnchor = {
+    id: 'iAc_coupled_symbols',
+    name: '思维链组件内部强耦合符号组 (tI/d5b/Fj/pqc/uY/n2/hAc)',
+    pattern: missingCoupled.length > 0 ? `缺失符号: ${missingCoupled.join(', ')}` : iacCoupledSymbols.join(', ')
+  };
+  if (missingCoupled.length === 0) {
+    matchedAnchors.push({ ...coupledAnchor, offset: iacStartIdx });
+  } else {
+    missingAnchors.push(coupledAnchor);
+  }
+
+  // 必选锚点 18：extension.js Webview 代理注入点（已挂钩或原生锚点命中）
+  const extAnchor = {
+    id: 'ext_renderWebviewHtml',
+    name: '扩展 Webview 渲染钩子入口 (extension.js)',
+    pattern: EXTENSION_HOOK_TARGET
+  };
+  if (fs.existsSync(extJsPath)) {
+    const extCode = fs.readFileSync(extJsPath, 'utf8');
+    const hookIdx = extCode.indexOf(EXTENSION_HOOK_MARKER);
+    const rawIdx = extCode.indexOf(EXTENSION_HOOK_TARGET);
+    if (hookIdx !== -1 || rawIdx !== -1) {
+      matchedAnchors.push({ ...extAnchor, offset: hookIdx !== -1 ? hookIdx : rawIdx });
+    } else {
+      missingAnchors.push(extAnchor);
+    }
+  } else {
+    missingAnchors.push({ ...extAnchor, pattern: `文件不存在: ${extJsPath}` });
+  }
+
+  // 外围增强锚点（可选分级评估：不阻断主引擎自愈，但透明展示在诊断报告中）
+  const optionalAnchors = [];
+  if (fs.existsSync(wbPath)) {
+    const wbSrc = fs.existsSync(wbPath + '.bak') && isWorkbenchPatched(fs.readFileSync(wbPath, 'utf8'))
+      ? fs.readFileSync(wbPath + '.bak', 'utf8')
+      : fs.readFileSync(wbPath, 'utf8');
+    const wbReady = wbSrc.includes(WORKBENCH_YHN_TARGET) || isWorkbenchPatched(wbSrc);
+    optionalAnchors.push({
+      id: 'workbench_yhn',
+      name: '外层工作台标题枢纽 (workbench yhn)',
+      matched: wbReady
+    });
+  }
+  if (fs.existsSync(jkPath)) {
+    const jkLive = fs.readFileSync(jkPath, 'utf8');
+    const jkSrc = fs.existsSync(jkPath + '.bak') && isJetskiPatched(jkLive)
+      ? fs.readFileSync(jkPath + '.bak', 'utf8')
+      : jkLive;
+    const jkTitleReady =
+      (jkSrc.includes(JETSKI_EST_TARGET) && jkSrc.includes(JETSKI_UEN_TARGET) && jkSrc.includes(JETSKI_SMA_TARGET)) ||
+      isJetskiPatched(jkLive);
+    const jkThoughtReady =
+      JETSKI_THOUGHT_PAIRS.every(([fromStr]) => jkSrc.includes(fromStr)) || isJetskiPatched(jkLive);
+    optionalAnchors.push({
+      id: 'jetski_titles',
+      name: '独立智能体弹窗标题枢纽 (jetskiAgent est/uEn/sMa)',
+      matched: jkTitleReady
+    });
+    optionalAnchors.push({
+      id: 'jetski_thoughts',
+      name: '独立智能体弹窗思考标签 (jetskiAgent Thought 4处)',
+      matched: jkThoughtReady
+    });
+  }
+
   return {
-    compatible: isCompatible,
+    compatible: missingAnchors.length === 0,
     matchedAnchors,
     missingAnchors,
+    optionalAnchors,
     codeLength: code.length
   };
 }
 
 /**
- * 阶段三：执行全自动无损重新编译与注入
+ * 阶段三：执行统一全自动无损重新编译与全量重注入（复用 core_injector.applyAllPatches）
  */
 function applyFullLocalization(logger) {
-  logger('  [自愈流水线 1/4] 同步官方最新版静态资产 hub_main.js...');
-  if (fs.existsSync(LIVE_HUB_MAIN)) {
-    fs.copyFileSync(LIVE_HUB_MAIN, SRC_HUB_MAIN);
-    logger(`  ✔ 已同步至 ${SRC_HUB_MAIN} (${formatBytes(fs.statSync(SRC_HUB_MAIN).size)})`);
-  }
-
-  logger('  [自愈流水线 2/4] 调用终极中文引擎重新编译 hub_main_zh.js...');
-  const buildScript = path.join(PATCH_DIR, 'build_ultimate_chinese_engine.js');
-  if (!fs.existsSync(buildScript)) {
-    throw new Error('未找到终极构建脚本: ' + buildScript);
-  }
-  const buildStart = Date.now();
-  execSync(`"${process.execPath}" "${buildScript}"`, { cwd: PATCH_DIR, stdio: 'pipe' });
-  logger(`  ✔ 终极中文引擎编译完成，已部署至 hub_main_zh.js (耗时: ${Date.now() - buildStart}ms)`);
-
-  logger('  [自愈流水线 3/4] 验证与同步透明反向代理、标题翻译微服务并挂载钩子...');
-  const templateProxy = path.join(PATCH_DIR, 'src', 'hub_proxy.template.js');
-  if (fs.existsSync(templateProxy)) {
-    const srcProxyBuf = fs.readFileSync(templateProxy);
-    const needSyncProxy = !fs.existsSync(PROXY_JS) || Buffer.compare(srcProxyBuf, fs.readFileSync(PROXY_JS)) !== 0;
-    if (needSyncProxy) {
-      fs.copyFileSync(templateProxy, PROXY_JS);
-      logger('  ✔ 已同步更新本地透明代理模块: hub_proxy.js');
-    } else {
-      logger('  ✔ 本地透明代理模块 hub_proxy.js 已为最新版本');
-    }
-  }
-
-  const srcTranslator = path.join(PATCH_DIR, 'src', 'title_translator.js');
-  if (fs.existsSync(srcTranslator)) {
-    const srcTransBuf = fs.readFileSync(srcTranslator);
-    const needSyncTrans = !fs.existsSync(TRANSLATOR_JS) || Buffer.compare(srcTransBuf, fs.readFileSync(TRANSLATOR_JS)) !== 0;
-    if (needSyncTrans) {
-      fs.copyFileSync(srcTranslator, TRANSLATOR_JS);
-      logger('  ✔ 已同步更新标题翻译微服务模块: title_translator.js');
-    } else {
-      logger('  ✔ 标题翻译微服务模块 title_translator.js 已为最新版本');
-    }
-  }
-
-  const srcThoughtTranslator = path.join(PATCH_DIR, 'src', 'thought_translator.js');
-  if (fs.existsSync(srcThoughtTranslator)) {
-    const srcThoughtBuf = fs.readFileSync(srcThoughtTranslator);
-    const needSyncThought = !fs.existsSync(THOUGHT_TRANSLATOR_JS) || Buffer.compare(srcThoughtBuf, fs.readFileSync(THOUGHT_TRANSLATOR_JS)) !== 0;
-    if (needSyncThought) {
-      fs.copyFileSync(srcThoughtTranslator, THOUGHT_TRANSLATOR_JS);
-      logger('  ✔ 已同步更新思维链实时翻译微服务模块: thought_translator.js');
-    } else {
-      logger('  ✔ 思维链实时翻译微服务模块 thought_translator.js 已为最新版本');
-    }
-  }
-  writeDeployMeta(EXT_DIR, path.join(PATCH_DIR, 'src'));
-
-  if (fs.existsSync(EXT_JS)) {
-    let extCode = fs.readFileSync(EXT_JS, 'utf8');
-    if (!extCode.includes('redirectIframeUrl')) {
-      const target = 'renderWebviewHtml(a,b,c,d){Jv(a);';
-      const replacement = 'renderWebviewHtml(a,b,c,d){try{var _hp=require("../hub_proxy.js");c=_hp.redirectIframeUrl(c);}catch(_err){}Jv(a);';
-      if (extCode.includes(target)) {
-        extCode = extCode.replace(target, replacement);
-        fs.writeFileSync(EXT_JS, extCode, 'utf8');
-        logger('  ✔ 已在 renderWebviewHtml 注入代理重定向钩子');
-      } else {
-        logger('  ⚠ 未找到 renderWebviewHtml 原始模式，尝试自适应注入...');
-      }
-    } else {
-      logger('  ✔ extension.js 代理重定向钩子已存在，无需重复注入');
-    }
-  }
-
-  logger('  [自愈流水线 4/4] 重新计算核心 bundle 签名并更新 product.json 完整性字典...');
-  if (fs.existsSync(PRODUCT_JSON)) {
-    try {
-      const prodJson = JSON.parse(fs.readFileSync(PRODUCT_JSON, 'utf8'));
-      if (prodJson.checksums) {
-        let syncedCount = 0;
-        for (const relPath in prodJson.checksums) {
-          const fullTarget = path.join(RESOURCES_APP, 'out', relPath);
-          if (fs.existsSync(fullTarget)) {
-            const curHash = computeChecksum(fs.readFileSync(fullTarget));
-            if (prodJson.checksums[relPath] !== curHash) {
-              prodJson.checksums[relPath] = curHash;
-              syncedCount++;
-            }
-          }
-        }
-        fs.writeFileSync(PRODUCT_JSON, JSON.stringify(prodJson, null, '\t'), 'utf8');
-        logger(`  ✔ product.json 完整性签名对齐完成 (自动对齐 ${syncedCount} 项，彻底杜绝安装损坏弹窗)`);
-      }
-    } catch (e) {
-      logger('  ⚠ 更新 product.json 校验和异常: ' + e.message);
-    }
-  }
+  return applyAllPatches({
+    patchDir: PATCH_DIR,
+    logger: (msg) => logger('  ' + msg.replace(/^\n+/, '')),
+    buildStdio: 'pipe'
+  });
 }
 
 function showNotification(title, message) {
@@ -503,8 +672,8 @@ function main() {
   const isLaunchRequested = args.includes('--launch') || args.includes('-l');
   const userAppArgs = args.filter(a => a !== '--launch' && a !== '-l');
 
-  // 1. 执行日志历史清理
-  const purgeResult = purgeExpiredLogs(LOG_FILE, 7, 500 * 1024);
+  // 1. 执行日志保留策略：写本次前仅保留最近 1 次历史运行（写入本次后文件内恰好保留最近 2 次）
+  const purgeResult = pruneLogKeepLastRuns(LOG_FILE, 1, 500 * 1024);
 
   // 2. 收集基础环境信息
   let appVersion = '未知版本';
@@ -518,8 +687,9 @@ function main() {
   }
 
   const now = new Date();
-  const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ` +
-                  `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+  const timeStr =
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ` +
+    `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 
   const logBuffer = [];
   const appendLog = (msg) => logBuffer.push(msg);
@@ -531,11 +701,11 @@ function main() {
   appendLog(`  • 客户端版本   : Antigravity IDE v${appVersion} (Distro: ${distroCommit.slice(0, 10)})`);
   appendLog(`  • 宿主平台     : Windows ${os.release()} (${os.arch()}) | Node: ${process.version}`);
   appendLog(`  • 日志存储位置 : ${LOG_FILE}`);
-  if (purgeResult.purgedCount > 0) {
-    appendLog(`  • 日志生命周期 : 自动销毁 ${purgeResult.purgedCount} 条超过 7 天的历史记录`);
+  if (purgeResult.purgedRuns > 0) {
+    appendLog(`  • 日志保留策略 : 仅保留最近 2 次运行日志（本次前已自动清理 ${purgeResult.purgedRuns} 次更早记录）`);
   }
   if (purgeResult.trimmed) {
-    appendLog(`  • 日志容量保护 : 文件体积超过 500KB，已自动安全裁剪早期数据`);
+    appendLog(`  • 日志容量保护 : 单次日志体积超过 500KB，已自动安全裁剪早期明细`);
   }
   if (userAppArgs.length > 0) {
     appendLog(`  • 启动透传参数 : ${userAppArgs.join(' ')}`);
@@ -546,30 +716,32 @@ function main() {
   // 3. 执行深度健康检查
   const health = inspectHealthDeeply();
 
-  // 输出 extension.js 诊断
   if (health.details.extension && health.details.extension.ok) {
-    appendLog(`  ✔ 核心扩展 (extension.js)   : 正常 [大小: ${health.details.extension.size}, 钩子: ${health.details.extension.hookStatus}]`);
+    appendLog(`  ✔ 核心扩展 (extension.js)   : 正常 [大小: ${health.details.extension.size}, 钩子: ${health.details.extension.hookStatus}, 扩展命令: ${health.details.extension.pkgStatus}]`);
   } else {
-    appendLog(`  ❌ 核心扩展 (extension.js)   : 异常 [${health.details.extension?.error || health.details.extension?.hookStatus || '未挂载'}]`);
+    appendLog(`  ❌ 核心扩展 (extension.js)   : 异常 [${health.details.extension?.error || `${health.details.extension?.hookStatus} / ${health.details.extension?.pkgStatus}`}]`);
   }
 
-  // 输出 hub_proxy.js 诊断
   if (health.details.proxy && health.details.proxy.ok) {
-    appendLog(`  ✔ 本地代理 (hub_proxy.js)   : 就绪 [大小: ${health.details.proxy.size}, 监听: ${health.details.proxy.port}, 标题翻译: ${health.details.proxy.translateEndpoint}]`);
+    appendLog(`  ✔ 本地代理 (hub_proxy.js)   : 就绪 [大小: ${health.details.proxy.size}, 监听: ${health.details.proxy.port}, ${health.details.proxy.translateEndpoint}, ${health.details.proxy.syncStatus}]`);
   } else {
-    appendLog(`  ❌ 本地代理 (hub_proxy.js)   : 异常 [${health.details.proxy?.error || health.details.proxy?.translateEndpoint || '未找到代理或翻译服务文件'}]`);
+    appendLog(`  ❌ 本地代理 (hub_proxy.js)   : 异常 [${health.details.proxy?.error || `${health.details.proxy?.translateEndpoint} | ${health.details.proxy?.syncStatus} | ${health.details.proxy?.metaStatus}`}]`);
   }
 
-  // 输出 hub_main_zh.js 诊断
   if (health.details.zhBundle && health.details.zhBundle.ok) {
-    appendLog(`  ✔ 汉化资产 (hub_main_zh.js) : 完整 [大小: ${health.details.zhBundle.size}]`);
+    appendLog(`  ✔ 汉化资产 (hub_main_zh.js) : 完整 [大小: ${health.details.zhBundle.size}, 版本校验: ${health.details.zhBundle.driftStatus}]`);
     const eng = health.details.zhBundle.engines;
     appendLog(`     └─► 引擎指纹核验: sT配置工厂(${eng.sT_元数据工厂}) | uT大标题(${eng.uT_顶层标题卡片}) | yT分区(${eng.yT_分区折叠面板}) | xT设置行(${eng.xT_设置卡片行}) | XB标题枢纽(${eng.XB_会话标题枢纽}) | iAc思维链(${eng.iAc_思维链流式翻译}) | DOM清洗(${eng.DOM_运行时清洗器})`);
   } else {
-    appendLog(`  ❌ 汉化资产 (hub_main_zh.js) : 异常 [${health.details.zhBundle?.error || '组件指纹不完整'}]`);
+    appendLog(`  ❌ 汉化资产 (hub_main_zh.js) : 异常 [${health.details.zhBundle?.error || health.details.zhBundle?.driftStatus || '组件指纹不完整'}]`);
   }
 
-  // 输出 product.json 完整性签名诊断
+  if (health.details.outerBundles && health.details.outerBundles.ok) {
+    appendLog(`  ✔ 外层工作台与智能体弹窗    : 正常 [workbench(${health.details.outerBundles.workbench}) | jetskiAgent(${health.details.outerBundles.jetskiAgent})]`);
+  } else {
+    appendLog(`  ❌ 外层工作台与智能体弹窗    : 异常 [workbench(${health.details.outerBundles?.workbench}) | jetskiAgent(${health.details.outerBundles?.jetskiAgent})]`);
+  }
+
   if (health.details.integrity && health.details.integrity.ok) {
     appendLog(`  ✔ 完整性签名 (product.json) : 100% 匹配 (共对齐 ${health.details.integrity.matched}/${health.details.integrity.total} 项核心 bundle，零损坏弹窗风险)`);
   } else {
@@ -586,30 +758,37 @@ function main() {
     appendLog(`  ✔ 结论: 汉化全链路健康就绪 (自检耗时: ${Date.now() - startTime}ms)`);
     appendLog(`  ✔ 动作: 准备拉起 Antigravity IDE 主进程...`);
   } else {
-    appendLog(`  ⚠ 结论: 检测到汉化失效或官方更新覆盖！`);
+    appendLog(`  ⚠ 结论: 检测到汉化失效、源码升级或官方更新覆盖！`);
     for (const fail of health.failures) {
       appendLog(`     • ${fail}`);
     }
 
     appendLog(`\n[新版本特征指纹兼容性评估 (Compatibility Prober)]`);
-    const candidatePath = fs.existsSync(LIVE_HUB_MAIN) ? LIVE_HUB_MAIN : SRC_HUB_MAIN;
+    const candidatePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
     const probe = probeVersionCompatibility(candidatePath);
 
+    const totalRequired = probe.matchedAnchors.length + probe.missingAnchors.length;
     appendLog(`  • 评估目标: ${candidatePath} (体积: ${formatBytes(probe.codeLength)})`);
-    appendLog(`  • 核心特征探测结果 (共 10 项核心锚点):`);
+    appendLog(`  • 必选核心特征探测结果 (${probe.matchedAnchors.length}/${totalRequired} 项必选锚点):`);
     for (const anchor of probe.matchedAnchors) {
       appendLog(`     ✔ [命中] ${anchor.name} (代码偏移: ${anchor.offset} 字节)`);
     }
     for (const anchor of probe.missingAnchors) {
       appendLog(`     ❌ [缺失] ${anchor.name} -> "${anchor.pattern}"`);
     }
+    if (probe.optionalAnchors && probe.optionalAnchors.length > 0) {
+      appendLog(`  • 外围增强特征评估 (${probe.optionalAnchors.filter(a => a.matched).length}/${probe.optionalAnchors.length} 项):`);
+      for (const opt of probe.optionalAnchors) {
+        appendLog(`     ${opt.matched ? '✔ [兼容]' : '⚠ [跳过]'} ${opt.name}`);
+      }
+    }
 
     if (probe.compatible) {
-      appendLog(`\n  🎉 评估结论: 新版本与当前汉化引擎 100% 兼容！开始执行全自动自愈流水线...`);
+      appendLog(`\n  🎉 评估结论: 新版本与当前汉化引擎 100% 兼容！开始执行统一全量自愈流水线...`);
       try {
         const healStart = Date.now();
         applyFullLocalization(appendLog);
-        appendLog(`  ✔ 自适应自愈汉化完成！(自愈流水线耗时: ${Date.now() - healStart}ms)`);
+        appendLog(`  ✔ 自适应全量自愈汉化完成！(自愈流水线耗时: ${Date.now() - healStart}ms)`);
       } catch (err) {
         appendLog(`  ❌ 自动汉化执行失败: ${err.message}`);
         appendLog(err.stack);
@@ -643,4 +822,13 @@ function main() {
   writeLog(logBuffer.join('\n'));
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  inspectHealthDeeply,
+  probeVersionCompatibility,
+  applyFullLocalization,
+  pruneLogKeepLastRuns
+};

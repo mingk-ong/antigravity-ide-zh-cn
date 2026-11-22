@@ -343,10 +343,13 @@ async function runTests() {
         path.join(PATCH_DIR, 'build_ultimate_chinese_engine.js'),
         path.join(SRC_DIR, 'thought_translator.js'),
         path.join(SRC_DIR, 'hub_proxy.template.js'),
+        path.join(SRC_DIR, 'core_injector.js'),
         path.join(SRC_DIR, 'patcher.js'),
         path.join(SRC_DIR, 'auto_updater.js'),
+        path.join(SRC_DIR, 'antigravity_watcher.js'),
         path.join(SRC_DIR, 'config.js'),
-        path.join(SRC_DIR, 'verifier.js')
+        path.join(SRC_DIR, 'verifier.js'),
+        path.join(SRC_DIR, 'restore.js')
       ];
       for (const f of files) {
         assert.ok(fs.existsSync(f), `文件不存在: ${f}`);
@@ -399,6 +402,135 @@ async function runTests() {
       const unclosedCode = 'Checking code:\n```js\nconst x = 1.2;';
       const codeParts = eng.splitThoughtSegments(unclosedCode, true);
       assert.ok(codeParts.some(p => p.kind === 'code' && p.translatable === false), '未闭合代码块应标记 code 并跳过');
+
+      // 校验“直出纯中文模式”三大新特性：
+      // (1) 句末真实句号立即锁定（无需等后续空格），而缩写 e.g. 不误锁
+      const cleanEndParts = eng.splitThoughtSegments('Checking `src/title_cache.json` and validating all entries.', true);
+      assert.strictEqual(cleanEndParts.filter(p => p.kind === 'sent')[0].committed, true, '完整英文句号结尾应立即锁定');
+      const abbrEndParts = eng.splitThoughtSegments('Checking common formats such as e.g.', true);
+      assert.strictEqual(abbrEndParts.filter(p => p.kind === 'sent')[0].committed, false, '缩写 e.g. 结尾不应提前误锁');
+
+      // (2) 译文门控：hideUntranslated=true 时未译英文句绝不裸露上屏；彻底失败(>=2)才兜底回退原文
+      const gatedState = eng.composeDisplayState(partsStreaming, new Map(), { hideUntranslated: true });
+      assert.strictEqual(gatedState.hasPending, true);
+      assert.ok(!gatedState.text.includes('Next verifying streaming tail'), `未译英文不应出现在门控输出中: ${gatedState.text}`);
+      assert.ok(gatedState.text.endsWith('（例如第 3.2 节）。'), `应干净去除尾部悬空分隔符: ${JSON.stringify(gatedState.text)}`);
+
+      const allPendingParts = eng.splitThoughtSegments('A brand new untranslated short thought sentence.', true);
+      const waitingFirst = eng.composeDisplayState(allPendingParts, new Map(), { hideUntranslated: true });
+      assert.strictEqual(waitingFirst.text, '', '首波译文未到前应返回空以便展示中文占位提示，绝不闪现英文');
+      assert.strictEqual(waitingFirst.hasPending, true);
+
+      const failMap = new Map([[allPendingParts[0].key, 2]]);
+      const hardFallback = eng.composeDisplayState(allPendingParts, new Map(), { hideUntranslated: true, failedKeys: failMap });
+      assert.strictEqual(hardFallback.text, 'A brand new untranslated short thought sentence.', '彻底断网失败时应安全回退原文防白屏');
+
+      // (3) 校验跨重挂载全局悬停状态表、小锁常驻展开、防滚动/后续步骤打断与离区自动收起机制
+      assert.strictEqual(typeof eng.getStepUiState, 'function', '缺少跨重挂载状态读取方法 getStepUiState');
+      assert.strictEqual(typeof eng.setStepUiState, 'function', '缺少跨重挂载状态写入方法 setStepUiState');
+      assert.strictEqual(typeof eng.getLastPointer, 'function', '缺少全局指针移动追踪方法 getLastPointer');
+      eng.setStepUiState('traj-1:2260', { hovered: true, pinnedByHover: true, locked: true, wasActive: true });
+      const restoredUi = eng.getStepUiState('traj-1:2260');
+      assert.strictEqual(restoredUi.pinnedByHover, true, '卸载重挂载后应保留悬停锁定态');
+      assert.strictEqual(restoredUi.locked, true, '卸载重挂载后应保留小锁锁定态');
+
+      assert.ok(code.includes('正在同步中文思考过程…'), '缺少首波中文占位提示');
+      assert.ok(code.includes('_scheduleGraceCollapse(1500,!1)'), '缺少 1.5s 短链防秒收起保持逻辑');
+      assert.ok(code.includes('data-agy-thought-wrap'), '缺少整块外层悬停包裹容器');
+      assert.ok(code.includes('thought-collapse-lock'), '缺少思考块右上角展开锁定小锁按钮');
+      assert.ok(code.includes('defaultExpanded:_effectiveActive'), '缺少重挂载首帧零闪烁展开继承');
+      assert.ok(code.includes('pointermove') && code.includes('_scheduleGraceCollapse(350,!0)'), '缺少鼠标离区 350ms 自动收起逻辑');
+      assert.ok(code.includes('getLastPointer') && code.includes('>220'), '缺少抗后续步骤滚动推高被动 mouseleave 防打断保护');
+      assert.ok(code.includes('3500'), '缺少 3.5s 断网硬超时兜底收起保护');
+    });
+
+    // ---------------------------------------------------------------------
+    // 第五组：更新适配探针、熔断防白屏与跨版本安全 .bak 防污染验证
+    // ---------------------------------------------------------------------
+    console.log('\n【第五组】更新适配探针、熔断保护与跨版本安全备份验证');
+
+    await test('更新适配探针 18 项必选核心锚点与外围增强锚点全量命中 + 内部耦合符号改名熔断校验', async () => {
+      const { probeVersionCompatibility } = require(path.join(SRC_DIR, 'auto_updater.js'));
+      const { resolveHubSourcePath } = require(path.join(SRC_DIR, 'core_injector.js'));
+      const hubSourcePath = resolveHubSourcePath(agyExtDir, PATCH_DIR);
+      const probeOk = probeVersionCompatibility(hubSourcePath);
+      assert.strictEqual(probeOk.compatible, true, `当前官方版本应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
+      assert.strictEqual(probeOk.matchedAnchors.length, 18, `应命中全部 18 项必选核心锚点，实际=${probeOk.matchedAnchors.length}`);
+      assert.ok(probeOk.optionalAnchors.length >= 3 && probeOk.optionalAnchors.every(a => a.matched), '外围 workbench/jetskiAgent 锚点应全部兼容');
+
+      // 模拟新版 Google 更改了 iAc 内部耦合混淆名 n2 -> z9，必须触发安全熔断拒绝注入
+      const mutatedHub = path.join(tmpCacheDir, 'mutated_hub_main.js');
+      const rawHub = fs.readFileSync(hubSourcePath, 'utf8');
+      const mutated = rawHub.replace('return D.createElement(n2,{trigger:q=>D.createElement(uY', 'return D.createElement(z9,{trigger:q=>D.createElement(uY');
+      assert.notStrictEqual(mutated, rawHub, '模拟变异测试必须实际修改到目标片段');
+      fs.writeFileSync(mutatedHub, mutated, 'utf8');
+      const probeBroken = probeVersionCompatibility(mutatedHub);
+      assert.strictEqual(probeBroken.compatible, false, '当 iAc 内部耦合符号变化时探针必须触发熔断');
+      assert.ok(
+        probeBroken.missingAnchors.some(a => a.id === 'iAc_coupled_symbols'),
+        '熔断报告必须精准定位到 iAc_coupled_symbols'
+      );
+    });
+
+    await test('跨版本安全备份 ensureFreshBackup：官方新版覆盖后自动刷新 .bak，绝不用旧 .bak 污染新版', async () => {
+      const { ensureFreshBackup } = require(path.join(SRC_DIR, 'core_injector.js'));
+      const mockTarget = path.join(tmpCacheDir, 'mock_workbench.js');
+      const mockBak = mockTarget + '.bak';
+
+      // 阶段 1：v1 官方原件首次备份
+      fs.writeFileSync(mockTarget, 'function yhn(t){return t?.summary} // OFFICIAL_V1', 'utf8');
+      const r1 = ensureFreshBackup(mockTarget, c => c.includes('PATCHED_MARKER'));
+      assert.strictEqual(r1.refreshed, true);
+      assert.ok(fs.readFileSync(mockBak, 'utf8').includes('OFFICIAL_V1'));
+
+      // 阶段 2：已打补丁后重复运行，必须保留原 .bak 不被已补丁内容覆写
+      fs.writeFileSync(mockTarget, 'function yhn(t){/* PATCHED_MARKER */}', 'utf8');
+      const r2 = ensureFreshBackup(mockTarget, c => c.includes('PATCHED_MARKER'));
+      assert.strictEqual(r2.refreshed, false);
+      assert.ok(fs.readFileSync(mockBak, 'utf8').includes('OFFICIAL_V1'), '重复重注入不应污染原始 .bak');
+
+      // 阶段 3：模拟官方升级覆写了 v2 新版原件（不含补丁标记），必须自动将 .bak 刷新为 OFFICIAL_V2
+      fs.writeFileSync(mockTarget, 'function yhn(t){return t?.summary} // OFFICIAL_V2', 'utf8');
+      const r3 = ensureFreshBackup(mockTarget, c => c.includes('PATCHED_MARKER'));
+      assert.strictEqual(r3.refreshed, true, '官方升级覆写新原件后必须自动刷新 .bak');
+      assert.ok(fs.readFileSync(mockBak, 'utf8').includes('OFFICIAL_V2'), '.bak 必须已更新为 v2 官方原件');
+    });
+
+    await test('输出日志留存策略：antigravity_auto_patch.log 与 hub_debug.log 严格只保留最近 2 次运行记录', async () => {
+      const { pruneLogKeepLastRuns } = require(path.join(SRC_DIR, 'auto_updater.js'));
+      process.env.AGY_PROXY_NO_AUTOSTART = '1';
+      const { pruneProxyLogKeepLastRuns } = require(PROXY_JS);
+
+      // 1. 验证 antigravity_auto_patch.log 写入 5 次运行块后严格保留最近 2 次（第 4、5 次）
+      const mockPatchLog = path.join(tmpCacheDir, 'mock_auto_patch.log');
+      const makeAutoBlock = (idx) =>
+        `================================================================================\n` +
+        `【启动自检与全景监控日志】 2026-11-22 23:00:0${idx}\n` +
+        `================================================================================\n` +
+        `RUN_MARKER_${idx}\n` +
+        `--------------------------------------------------------------------------------\n`;
+      for (let i = 1; i <= 5; i++) {
+        pruneLogKeepLastRuns(mockPatchLog, 1);
+        fs.appendFileSync(mockPatchLog, makeAutoBlock(i) + '\n', 'utf8');
+      }
+      const patchLogFinal = fs.readFileSync(mockPatchLog, 'utf8');
+      assert.ok(!patchLogFinal.includes('RUN_MARKER_1') && !patchLogFinal.includes('RUN_MARKER_2') && !patchLogFinal.includes('RUN_MARKER_3'), '更早的 3 次自检日志必须已裁除');
+      assert.ok(patchLogFinal.includes('RUN_MARKER_4') && patchLogFinal.includes('RUN_MARKER_5'), '必须完整保留最近 2 次自检日志');
+
+      // 2. 验证 hub_debug.log 写入 5 次代理会话后严格保留最近 2 次（第 4、5 次）
+      const mockProxyLog = path.join(tmpCacheDir, 'mock_hub_debug.log');
+      for (let i = 1; i <= 5; i++) {
+        pruneProxyLogKeepLastRuns(mockProxyLog, 1);
+        fs.appendFileSync(
+          mockProxyLog,
+          `[2026-11-22T15:00:0${i}.000Z] [Proxy] initProxy starting on preferred port: 14588\n` +
+          `[2026-11-22T15:00:0${i}.100Z] PROXY_SESSION_${i}\n`,
+          'utf8'
+        );
+      }
+      const proxyLogFinal = fs.readFileSync(mockProxyLog, 'utf8');
+      assert.ok(!proxyLogFinal.includes('PROXY_SESSION_1') && !proxyLogFinal.includes('PROXY_SESSION_2') && !proxyLogFinal.includes('PROXY_SESSION_3'), '更早的 3 次代理日志必须已裁除');
+      assert.ok(proxyLogFinal.includes('PROXY_SESSION_4') && proxyLogFinal.includes('PROXY_SESSION_5'), '必须完整保留最近 2 次代理日志');
     });
   } finally {
     try {

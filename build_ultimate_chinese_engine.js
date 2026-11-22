@@ -5,14 +5,23 @@ const { getTargetPaths } = require('./src/config');
 const { agyExtDir } = getTargetPaths();
 const localSrcPath = path.join(__dirname, 'hub_main.js');
 const liveSrcPath = path.join(agyExtDir, 'hub_main.js');
-const srcPath = fs.existsSync(localSrcPath) ? localSrcPath : liveSrcPath;
+// 优先使用当前安装目录的官方最新版 hub_main.js，防止升级后沿用本地旧版缓存
+const srcPath = fs.existsSync(liveSrcPath) ? liveSrcPath : localSrcPath;
 const dstPath = path.join(agyExtDir, 'hub_main_zh.js');
 const backupDst = path.join(__dirname, 'hub_main_zh.js');
 const dictPath = path.join(__dirname, 'src', 'title_dicts.json');
 const cachePath = path.join(__dirname, 'src', 'title_cache.json');
 
 if (!fs.existsSync(srcPath)) {
-  throw new Error(`❌ 未找到官方静态源 hub_main.js（已检查 ${localSrcPath} 与 ${liveSrcPath}），请确认 Antigravity IDE 安装路径或设置 ANTIGRAVITY_IDE_DIR`);
+  throw new Error(`❌ 未找到官方静态源 hub_main.js（已检查 ${liveSrcPath} 与 ${localSrcPath}），请确认 Antigravity IDE 安装路径或设置 ANTIGRAVITY_IDE_DIR`);
+}
+if (srcPath === liveSrcPath) {
+  try {
+    const liveBuf = fs.readFileSync(liveSrcPath);
+    if (!fs.existsSync(localSrcPath) || Buffer.compare(liveBuf, fs.readFileSync(localSrcPath)) !== 0) {
+      fs.writeFileSync(localSrcPath, liveBuf);
+    }
+  } catch (_e) {}
 }
 
 let code = fs.readFileSync(srcPath, 'utf8');
@@ -592,23 +601,219 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
     l=d5b()===J.CascadeRunStatus.RUNNING,
     m=(d===J.CortexStepStatus.RUNNING||d===J.CortexStepStatus.GENERATING)&&l&&!f&&!b;
   var _feat=Fj(),_n=pqc(),_steer=_feat.get("conversationView")?.trajectorySteering,_steerBtn=_steer?.SteerButton,_steerEd=_steer?.SteerableThoughtEditor;
-  var [_exp,_setExp]=(0,D.useState)(m);
-  var [_showOrig,_setShowOrig]=(0,D.useState)(!1);
+  var _engBoot=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+  var _stepInfo=c?.sourceTrajectoryStepInfo;
+  var _stepKey=_stepInfo?(_stepInfo.trajectoryId+":"+_stepInfo.stepIndex):(_engBoot&&a?("txt:"+_engBoot.hashKey(_engBoot.normalize(String(a).slice(0,120)))):"anon");
+  var _initUi=_engBoot?_engBoot.getStepUiState(_stepKey):null;
+  var _initLocked=!!(_initUi&&!_initUi.manualClosed&&_initUi.locked);
+  var _initNeedShortHold=!1;
+  if(!m&&_initUi&&_initUi.wasActive&&!_initUi.manualClosed&&!_initUi.graceDone&&!_initLocked&&!_initUi.hovered&&!_initUi.pinnedByHover&&!(_initUi.graceUntil&&_initUi.graceUntil>Date.now())&&_engBoot&&a){
+    try{
+      var _initParts=_engBoot.splitThoughtSegments(a,!1);
+      for(var _ii=0;_ii<_initParts.length;_ii++){
+        if(_initParts[_ii].kind==="sent"&&_initParts[_ii].translatable){_initNeedShortHold=!0;break;}
+      }
+      if(_initNeedShortHold&&_engBoot.setStepUiState){
+        _engBoot.setStepUiState(_stepKey,{graceUntil:Date.now()+3500});
+        _initUi=_engBoot.getStepUiState(_stepKey);
+      }
+    }catch(_ie){}
+  }
+  var _initHold=!!(_initUi&&!_initUi.manualClosed&&(_initLocked||_initUi.hovered||_initUi.pinnedByHover||_initNeedShortHold||(_initUi.graceUntil&&_initUi.graceUntil>Date.now())));
+  var [_exp,_setExp]=(0,D.useState)(m||_initHold);
+  var [_holdActive,_setHoldActive]=(0,D.useState)(_initHold);
+  var [_locked,_setLocked]=(0,D.useState)(_initLocked);
+  var [_showOrig,_setShowOrig]=(0,D.useState)(!!(_initUi&&_initUi.showOrig));
   var [_tick,_setTick]=(0,D.useState)(0);
   var [_translating,_setTranslating]=(0,D.useState)(!1);
+  var _wrapRef=(0,D.useRef)(null);
   var _prevMRef=(0,D.useRef)(m);
+  var _wasActiveRef=(0,D.useRef)(m||!!(_initUi&&_initUi.wasActive));
+  var _firstWaveSentRef=(0,D.useRef)(!!(_initUi&&_initUi.firstWaveSent));
+  var _lockedRef=(0,D.useRef)(_initLocked);
+  var _hoveredRef=(0,D.useRef)(!!(_initUi&&(_initUi.hovered||_initUi.pinnedByHover)));
+  var _pinnedRef=(0,D.useRef)(!!(_initUi&&_initUi.pinnedByHover));
   var _seqRef=(0,D.useRef)(0);
   var _tempTailRef=(0,D.useRef)(new Map());
   var _failedRef=(0,D.useRef)(new Map());
   var _tailTrackRef=(0,D.useRef)({prefix:"",ts:0,sentKey:""});
   var _debounceRef=(0,D.useRef)(null);
   var _tailTimerRef=(0,D.useRef)(null);
-  (0,D.useEffect)(()=>{
-    if(_prevMRef.current!==m){
-      _prevMRef.current=m;
-      _setExp(m);
+  var _holdCloseRef=(0,D.useRef)(null);
+  var _holdHardCapRef=(0,D.useRef)(null);
+  var _syncUi=function(_patch){
+    try{
+      var _e=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+      if(_e&&_e.setStepUiState)_e.setStepUiState(_stepKey,_patch);
+    }catch(_se){}
+  };
+  var _clearHoldTimers=function(){
+    if(_holdCloseRef.current){clearTimeout(_holdCloseRef.current);_holdCloseRef.current=null;}
+    if(_holdHardCapRef.current){clearTimeout(_holdHardCapRef.current);_holdHardCapRef.current=null;}
+  };
+  var _collapseNow=function(_isManual){
+    _clearHoldTimers();
+    _lockedRef.current=!1;
+    _setLocked(!1);
+    _hoveredRef.current=!1;
+    _pinnedRef.current=!1;
+    _syncUi({locked:!1,hovered:!1,pinnedByHover:!1,graceUntil:0,graceDone:!0,manualClosed:!!_isManual});
+    _setHoldActive(!1);
+    _setExp(!1);
+  };
+  var _scheduleGraceCollapse=function(_delayMs,_forceAfterLeave){
+    if(_lockedRef.current)return;
+    if(!_forceAfterLeave&&(_hoveredRef.current||_pinnedRef.current))return;
+    if(_holdCloseRef.current){clearTimeout(_holdCloseRef.current);_holdCloseRef.current=null;}
+    var _until=Date.now()+_delayMs;
+    _syncUi({graceUntil:_until});
+    _holdCloseRef.current=setTimeout(function(){
+      _holdCloseRef.current=null;
+      if(_lockedRef.current||_hoveredRef.current||_pinnedRef.current)return;
+      _collapseNow(!1);
+    },_delayMs);
+  };
+  var _enterHover=function(){
+    _hoveredRef.current=!0;
+    if(_lockedRef.current){
+      _clearHoldTimers();
+      _syncUi({hovered:!0});
+      return;
     }
-  },[m]);
+    if(_exp||m||_holdActive){
+      _pinnedRef.current=!0;
+      _clearHoldTimers();
+      _syncUi({hovered:!0,pinnedByHover:!0,manualClosed:!1,graceUntil:0});
+      if(!m&&!_holdActive)_setHoldActive(!0);
+      if(!_exp)_setExp(!0);
+    }else{
+      _syncUi({hovered:!0});
+    }
+  };
+  var _leaveHover=function(_ev,_fromPointerMove){
+    if(_lockedRef.current){
+      // 上锁状态：停用鼠标离开自动折叠，仅清除瞬时悬停标记
+      _hoveredRef.current=!1;
+      _pinnedRef.current=!1;
+      _syncUi({hovered:!1,pinnedByHover:!1});
+      return;
+    }
+    if(!_fromPointerMove){
+      var _el=_wrapRef.current;
+      if(_el&&typeof _el.getBoundingClientRect==="function"&&_ev&&typeof _ev.clientX==="number"&&typeof _ev.clientY==="number"){
+        var _r=_el.getBoundingClientRect();
+        if(_ev.clientX>=_r.left-6&&_ev.clientX<=_r.right+6&&_ev.clientY>=_r.top-6&&_ev.clientY<=_r.bottom+6)return;
+      }
+      var _engPtr=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+      var _lp=_engPtr&&_engPtr.getLastPointer?_engPtr.getLastPointer():null;
+      // 被动滚动/后续步骤推高布局导致的假性 mouseleave（鼠标超 220ms 未主动移动）：免疫打断，保持展开直到用户真实移走鼠标
+      if(_pinnedRef.current&&_lp&&_lp.ts>0&&(Date.now()-_lp.ts)>220)return;
+    }
+    _hoveredRef.current=!1;
+    var _wasPinned=_pinnedRef.current;
+    _pinnedRef.current=!1;
+    _syncUi({hovered:!1,pinnedByHover:!1});
+    if(m){
+      _clearHoldTimers();
+      if(_holdActive)_setHoldActive(!1);
+    }else if(_wasPinned||_holdActive||_exp){
+      _scheduleGraceCollapse(350,!0);
+    }
+  };
+  (0,D.useEffect)(()=>{
+    if(m){
+      _wasActiveRef.current=!0;
+      _syncUi({wasActive:!0,manualClosed:!1,graceDone:!1});
+    }
+    if(_prevMRef.current!==m){
+      var _wasM=_prevMRef.current;
+      _prevMRef.current=m;
+      if(m){
+        _clearHoldTimers();
+        if(!_pinnedRef.current&&!_lockedRef.current)_setHoldActive(!1);
+        _setExp(!0);
+      }else if(_lockedRef.current){
+        // 上锁状态：思考结束绝不自动收起
+        _clearHoldTimers();
+        _syncUi({locked:!0,manualClosed:!1,graceUntil:0});
+        _setHoldActive(!0);
+        _setExp(!0);
+      }else if(_hoveredRef.current||_pinnedRef.current){
+        // 鼠标正悬停在思考块上：无论中英文、无论是否出现后续步骤，绝对保持展开不收起
+        _clearHoldTimers();
+        _pinnedRef.current=!0;
+        _syncUi({hovered:!0,pinnedByHover:!0,manualClosed:!1,graceUntil:0});
+        _setHoldActive(!0);
+        _setExp(!0);
+      }else if(_wasM&&_wasActiveRef.current&&!_showOrig){
+        // 思考刚结束且鼠标未悬停：若含英文待译/刚译内容，进入 1.5s 短链防秒收起保持期
+        var _needHold=!1;
+        try{
+          var _hEng=typeof window!=="undefined"?window.__agyThoughtEngine:null;
+          if(_hEng&&a){
+            var _hParts=_hEng.splitThoughtSegments(a,!1);
+            for(var _hi=0;_hi<_hParts.length;_hi++){
+              if(_hParts[_hi].kind==="sent"&&_hParts[_hi].translatable){_needHold=!0;break;}
+            }
+          }
+        }catch(_he){}
+        if(_needHold){
+          _syncUi({graceUntil:Date.now()+3500});
+          _setHoldActive(!0);
+          _setExp(!0);
+          if(_holdHardCapRef.current)clearTimeout(_holdHardCapRef.current);
+          _holdHardCapRef.current=setTimeout(function(){
+            _holdHardCapRef.current=null;
+            if(_lockedRef.current||_hoveredRef.current||_pinnedRef.current)return;
+            _collapseNow(!1);
+          },3500);
+        }else{
+          _collapseNow(!1);
+        }
+      }else{
+        _collapseNow(!1);
+      }
+    }
+  },[m,_showOrig,a]);
+  // 跨重挂载与离开区域精确追踪：仅在未上锁且鼠标真正主动移出思考块区域后才自动收起，免疫后续步骤推高滚动条打断
+  (0,D.useEffect)(()=>{
+    if(!_holdActive&&!(m&&_exp))return;
+    if(!m&&_holdActive&&!_lockedRef.current){
+      var _u=_engBoot?_engBoot.getStepUiState(_stepKey):null;
+      if(!_pinnedRef.current&&_u&&_u.graceUntil&&_u.graceUntil>Date.now()){
+        var _rem=Math.max(300,_u.graceUntil-Date.now());
+        if(!_translating)_scheduleGraceCollapse(_rem,!1);
+        if(!_holdHardCapRef.current){
+          _holdHardCapRef.current=setTimeout(function(){
+            _holdHardCapRef.current=null;
+            if(_lockedRef.current||_hoveredRef.current||_pinnedRef.current)return;
+            _collapseNow(!1);
+          },_rem);
+        }
+      }
+    }
+    var _onPointerMove=function(_ev){
+      if(_lockedRef.current)return;
+      if(!_pinnedRef.current&&!_hoveredRef.current)return;
+      var _el=_wrapRef.current;
+      if(!_el||typeof _el.getBoundingClientRect!=="function")return;
+      var _r=_el.getBoundingClientRect();
+      var _pad=10;
+      var _inside=_ev.clientX>=_r.left-_pad&&_ev.clientX<=_r.right+_pad&&_ev.clientY>=_r.top-_pad&&_ev.clientY<=_r.bottom+_pad;
+      if(_inside){
+        _hoveredRef.current=!0;
+        _pinnedRef.current=!0;
+        _clearHoldTimers();
+      }else{
+        _leaveHover(_ev,!0);
+      }
+    };
+    window.addEventListener("pointermove",_onPointerMove,{passive:!0});
+    return function(){
+      window.removeEventListener("pointermove",_onPointerMove);
+    };
+  },[m,_exp,_holdActive,_locked,_translating,_stepKey]);
+  (0,D.useEffect)(()=>{return function(){_clearHoldTimers();};},[]);
   (0,D.useEffect)(()=>{
     var _alive=!0;
     var _cleanup=()=>{
@@ -616,27 +821,33 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
       if(_tailTimerRef.current){clearTimeout(_tailTimerRef.current);_tailTimerRef.current=null;}
     };
     try{
-      if(!a||!k||!_exp||_showOrig)return _cleanup;
+      if(!a||!k||!(_exp||_holdActive)||_showOrig)return _cleanup;
       var _eng=typeof window!=="undefined"?window.__agyThoughtEngine:null;
       if(!_eng)return _cleanup;
       var _parts=_eng.splitThoughtSegments(a,m);
       var _needCommitted=[];
       var _seenBatch=new Set();
       var _tailPart=null;
+      var _hasAnyZh=!1;
       for(var _i=0;_i<_parts.length;_i++){
         var _pt=_parts[_i];
         if(_pt.kind!=="sent"||!_pt.translatable)continue;
         if(_pt.committed){
-          if(!_eng.lookupSync(_pt.norm,_pt.key)&&!_seenBatch.has(_pt.key)&&((_failedRef.current.get(_pt.key)||0)<2)){
+          if(_eng.lookupSync(_pt.norm,_pt.key)){
+            _hasAnyZh=!0;
+          }else if(!_seenBatch.has(_pt.key)&&((_failedRef.current.get(_pt.key)||0)<2)){
             _seenBatch.add(_pt.key);
             _needCommitted.push({id:_pt.key,text:_pt.norm,persist:!0});
           }
         }else{
           _tailPart=_pt;
+          if(_tempTailRef.current.has(_pt.key))_hasAnyZh=!0;
         }
       }
       if(_needCommitted.length>0){
         var _runCommitted=async function(){
+          _firstWaveSentRef.current=!0;
+          _syncUi({firstWaveSent:!0});
           var _mySeq=++_seqRef.current;
           if(_alive)_setTranslating(!0);
           try{
@@ -652,15 +863,20 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
                   _changed=!0;
                 }else if(_rItem&&_rItem.source==="fallback"){
                   _failedRef.current.set(_rItem.id,(_failedRef.current.get(_rItem.id)||0)+1);
+                  _changed=!0;
                 }
               }
               if(_alive&&_changed)_setTick(function(_v){return _v+1;});
             }
           }catch(_e){}finally{
-            if(_alive&&_mySeq===_seqRef.current)_setTranslating(!1);
+            if(_alive&&_mySeq===_seqRef.current){
+              _setTranslating(!1);
+              if(!m&&_holdActive&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current)_scheduleGraceCollapse(1500,!1);
+            }
           }
         };
-        if(!m){
+        // 首波 0ms 立即发车（零防抖），或思考已结束立即发车；后续增量波次 200ms 防抖合并
+        if(!m||!_firstWaveSentRef.current){
           _runCommitted();
         }else{
           _debounceRef.current=setTimeout(_runCommitted,200);
@@ -671,8 +887,11 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
         if(_tailTrackRef.current.prefix!==_tPrefix){
           _tailTrackRef.current={prefix:_tPrefix,ts:_now,sentKey:""};
         }
-        if(_tailPart.norm.length>=140&&_tailTrackRef.current.sentKey!==_tailPart.key&&!_tempTailRef.current.has(_tailPart.key)){
-          var _wait=Math.max(0,1500-(_now-_tailTrackRef.current.ts));
+        // 首屏尚未出中文且尾句 >= 45 字时 350ms 提前预译；其余长尾句 >= 140 字且超 1500ms 预译（均不入盘）
+        var _tailMinLen=_hasAnyZh?140:45;
+        var _tailDelayMs=_hasAnyZh?1500:350;
+        if(_tailPart.norm.length>=_tailMinLen&&_tailTrackRef.current.sentKey!==_tailPart.key&&!_tempTailRef.current.has(_tailPart.key)){
+          var _wait=Math.max(0,_tailDelayMs-(_now-_tailTrackRef.current.ts));
           var _capKey=_tailPart.key,_capText=_tailPart.norm;
           _tailTimerRef.current=setTimeout(async function(){
             if(!_alive)return;
@@ -689,16 +908,19 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
             }catch(_te){}
           },_wait);
         }
+      }else if(!m&&_holdActive&&!_translating&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current){
+        // 思考已结束且译文已全部就绪（未上锁、未悬停）：保留约 1.5 秒供自然阅读后再优雅收起
+        _scheduleGraceCollapse(1500,!1);
       }
     }catch(_err){}
     return function(){
       _alive=!1;
       _cleanup();
     };
-  },[a,k,m,_exp,_showOrig]);
+  },[a,k,m,_exp,_holdActive,_showOrig,_tick]);
   if(!a)return null;
   if(!k)return m?D.createElement("div",{className:"flex w-full items-center gap-1.5 px-2 min-h-8 text-left rounded-lg text-muted-foreground tabular-nums select-none"},D.createElement(uY,null,D.createElement(hAc,{metadata:c}))):null;
-  var _rendered=a,_hasEn=!1;
+  var _rendered=a,_hasEn=!1,_isWaitingFirstZh=!1,_hasPendingZh=!1;
   try{
     var _engRender=typeof window!=="undefined"?window.__agyThoughtEngine:null;
     if(_engRender){
@@ -707,35 +929,105 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
         if(_rParts[_ri].kind==="sent"&&_rParts[_ri].translatable){_hasEn=!0;break;}
       }
       if(_hasEn&&!_showOrig){
-        _rendered=_engRender.composeDisplay(_rParts,_tempTailRef.current);
+        var _comp=_engRender.composeDisplayState(_rParts,_tempTailRef.current,{hideUntranslated:!0,failedKeys:_failedRef.current});
+        _hasPendingZh=_comp.hasPending;
+        if(_comp.text&&_comp.text.trim()){
+          _rendered=_comp.text;
+        }else if(_comp.hasPending){
+          _isWaitingFirstZh=!0;
+          _rendered="";
+        }
       }
     }
   }catch(_re){_rendered=a;}
   var p=b?\`思考了 \${Math.max(1,Number(b.seconds))} 秒\`:"思考过程";
+  var _toggleLock=function(_ev){
+    _ev.stopPropagation();
+    var _next=!_lockedRef.current;
+    _lockedRef.current=_next;
+    _setLocked(_next);
+    if(_next){
+      _clearHoldTimers();
+      _syncUi({locked:!0,manualClosed:!1,graceDone:!1,graceUntil:0});
+      if(!m&&!_holdActive)_setHoldActive(!0);
+      if(!_exp)_setExp(!0);
+    }else{
+      _hoveredRef.current=!0;
+      _pinnedRef.current=!0;
+      _syncUi({locked:!1,hovered:!0,pinnedByHover:!0});
+      if(!m&&!_holdActive)_setHoldActive(!0);
+    }
+  };
   var _renderBody=(q,t)=>{
     var _content=q===a?_rendered:q;
+    var _showBusy=_hasEn&&(_translating||_hasPendingZh)&&!_showOrig;
+    var _lockIcon=_locked
+      ? D.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
+          D.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
+          D.createElement("path",{d:"M7 11V7a5 5 0 0 1 10 0v4"})
+        )
+      : D.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
+          D.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
+          D.createElement("path",{d:"M7 11V7a5 5 0 0 1 9.9-1"})
+        );
     return D.createElement("div",{className:"cursor-edit group relative text-secondary-foreground pl-2"},
-      _hasEn&&D.createElement("div",{className:"flex items-center justify-end gap-2 pb-1 text-[11px] text-muted-foreground/75 select-none"},
-        _translating&&!_showOrig&&D.createElement("span",{className:"animate-pulse"},"实时译文中…"),
+      D.createElement("div",{className:"flex items-center justify-end gap-1.5 pb-1 pr-1 text-[11px] text-muted-foreground/75 select-none"},
+        _showBusy&&D.createElement("span",{className:"animate-pulse"},_isWaitingFirstZh?"正在同步中文思考…":"实时译文中…"),
         D.createElement("button",{
+          type:"button",
+          "data-testid":"thought-collapse-lock",
+          "aria-pressed":_locked,
+          title:_locked?"已锁定展开（鼠标离开不会自动折叠，点击解锁）":"锁定展开（上锁后鼠标离开不会自动折叠）",
+          className:"inline-flex items-center justify-center px-1.5 py-0.5 rounded hover:bg-muted/60 hover:text-foreground transition-colors cursor-pointer",
+          style:_locked?{color:"#f59e0b",backgroundColor:"rgba(245,158,11,0.14)"}:void 0,
+          onClick:_toggleLock
+        },_lockIcon),
+        _hasEn&&D.createElement("button",{
           type:"button",
           "data-testid":"thought-lang-toggle",
           className:"px-1.5 py-0.5 rounded hover:bg-muted/60 hover:text-foreground transition-colors cursor-pointer",
-          onClick:function(_ev){_ev.stopPropagation();_setShowOrig(function(_v){return !_v;});}
+          onClick:function(_ev){
+            _ev.stopPropagation();
+            _setShowOrig(function(_v){
+              var _nv=!_v;
+              _syncUi({showOrig:_nv});
+              return _nv;
+            });
+          }
         },_showOrig?"查看译文":"查看原文")
       ),
-      D.createElement(g,{animate:t&&m},_content)
+      _isWaitingFirstZh&&!_showOrig
+        ? D.createElement("div",{className:"py-1 text-sm text-muted-foreground/80 animate-pulse select-none"},"正在同步中文思考过程…")
+        : D.createElement(g,{animate:t&&m},_content)
     );
   };
-  return D.createElement(n2,{
+  var _effectiveActive=m||_holdActive;
+  return D.createElement("div",{
+    ref:_wrapRef,
+    "data-agy-thought-wrap":"1",
+    onMouseEnter:_enterHover,
+    onMouseLeave:function(_ev){_leaveHover(_ev,!1);}
+  },D.createElement(n2,{
     trigger:q=>D.createElement(uY,{active:m,className:"text-muted-foreground"},m||_n?D.createElement(hAc,{metadata:c,doneText:m?void 0:p,animate:!q}):p),
-    isActive:m,
+    defaultExpanded:_effectiveActive,
+    isActive:_effectiveActive,
     dataTestId:"thinking-collapsible-trigger",
-    onToggle:_open=>{_setExp(!!_open);},
+    onToggle:_open=>{
+      if(!_open){
+        _collapseNow(!0);
+      }else{
+        _clearHoldTimers();
+        _hoveredRef.current=!0;
+        _pinnedRef.current=!0;
+        _syncUi({hovered:!0,pinnedByHover:!0,manualClosed:!1,graceDone:!1,graceUntil:0});
+        _setHoldActive(!0);
+        _setExp(!0);
+      }
+    },
     maxHeight:200,
     autoScroll:!0,
     smoothScroll:!1
-  },_steerBtn&&D.createElement(_steerBtn,{metadata:c,isRunning:l}),_steerEd?D.createElement(_steerEd,{metadata:c,thinking:a,isRunning:l},_renderBody):_renderBody(a,l));
+  },_steerBtn&&D.createElement(_steerBtn,{metadata:c,isRunning:l}),_steerEd?D.createElement(_steerEd,{metadata:c,thinking:a,isRunning:l},_renderBody):_renderBody(a,l)));
 };`;
 code = code.replace(oldIac, newIac);
 console.log('✔ [锚点 8/8] 已重构 iAc 思维链实时流式翻译与增量锁定引擎');
@@ -955,7 +1247,46 @@ const thoughtEngineRuntimeScript = `
   if (window.__agyThoughtEngine) return;
 
   var L1_MAX = 2000;
+  var UI_STATE_MAX = 500;
   var l1Cache = new Map();
+  var uiStates = new Map();
+  var lastPointer = { x: -1, y: -1, ts: 0 };
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pointermove', function(ev) {
+      if (ev && typeof ev.clientX === 'number' && typeof ev.clientY === 'number') {
+        if (Math.abs(ev.clientX - lastPointer.x) >= 2 || Math.abs(ev.clientY - lastPointer.y) >= 2) {
+          lastPointer.x = ev.clientX;
+          lastPointer.y = ev.clientY;
+          lastPointer.ts = Date.now();
+        }
+      }
+    }, { passive: true, capture: true });
+  }
+  function getLastPointer() {
+    return lastPointer;
+  }
+
+  function getStepUiState(stepKey) {
+    if (!stepKey || !uiStates.has(stepKey)) return null;
+    var val = uiStates.get(stepKey);
+    uiStates.delete(stepKey);
+    uiStates.set(stepKey, val);
+    return val;
+  }
+
+  function setStepUiState(stepKey, patch) {
+    if (!stepKey) return null;
+    var cur = uiStates.get(stepKey) || {};
+    var next = Object.assign({}, cur, patch || {});
+    uiStates.delete(stepKey);
+    uiStates.set(stepKey, next);
+    while (uiStates.size > UI_STATE_MAX) {
+      var oldest = uiStates.keys().next().value;
+      if (oldest === undefined) break;
+      uiStates.delete(oldest);
+    }
+    return next;
+  }
   var staticMap = {
     "I'm thinking through how to approach this.": "正在梳理处理思路。",
     "Thinking through how to approach this.": "正在梳理处理思路。",
@@ -1053,7 +1384,7 @@ const thoughtEngineRuntimeScript = `
     for (var i = 0; i < masked.length; i++) {
       var ch = masked[i];
       if (ch === '\\n') {
-        if (i > start) pushSent(para.slice(start, i), parts);
+        if (i > start) pushSent(para.slice(start, i), masked.slice(start, i), parts);
         parts.push({ kind: 'sep', text: '\\n' });
         start = i + 1;
         continue;
@@ -1064,7 +1395,7 @@ const thoughtEngineRuntimeScript = `
         if (sp > i + 1 && sp < para.length) {
           var nextCh = para[sp];
           if (/[A-Z0-9\\x60"'(\\[]/.test(nextCh) || nextCh.charCodeAt(0) >= 0x4e00) {
-            pushSent(para.slice(start, i + 1), parts);
+            pushSent(para.slice(start, i + 1), masked.slice(start, i + 1), parts);
             parts.push({ kind: 'sep', text: para.slice(i + 1, sp) });
             start = sp;
             i = sp - 1;
@@ -1073,11 +1404,11 @@ const thoughtEngineRuntimeScript = `
       }
     }
     if (start < para.length) {
-      pushSent(para.slice(start), parts);
+      pushSent(para.slice(start), masked.slice(start), parts);
     }
   }
 
-  function pushSent(rawSlice, parts) {
+  function pushSent(rawSlice, maskedSlice, parts) {
     var norm = normalize(rawSlice);
     if (!norm) {
       if (rawSlice) parts.push({ kind: 'sep', text: rawSlice });
@@ -1089,13 +1420,16 @@ const thoughtEngineRuntimeScript = `
     var trail = trailMatch ? trailMatch[1] : '';
     if (lead) parts.push({ kind: 'sep', text: lead });
     var core = rawSlice.slice(lead.length, rawSlice.length - trail.length);
+    var maskedCore = String(maskedSlice || rawSlice).slice(lead.length, rawSlice.length - trail.length).trim();
     var coreNorm = normalize(core);
     var key = hashKey(coreNorm);
+    var endsCleanly = coreNorm.length >= 12 && /[.!?。！？]["'”’)]?$/.test(maskedCore);
     parts.push({
       kind: 'sent',
       text: core,
       norm: coreNorm,
       key: key,
+      endsCleanly: endsCleanly,
       committed: true,
       translatable: shouldTranslate(coreNorm)
     });
@@ -1127,7 +1461,7 @@ const thoughtEngineRuntimeScript = `
       cursor = closeIdx + 3;
     }
 
-    // 标记流式未闭合尾句
+    // 流式末尾句判定：若经安全掩码校验以真实句末标点闭合（非缩写/文件名小数点），立即锁定加速首屏
     if (isStreaming) {
       var lastSentIdx = -1;
       for (var k = parts.length - 1; k >= 0; k--) {
@@ -1137,7 +1471,7 @@ const thoughtEngineRuntimeScript = `
         var lastPart = parts[lastSentIdx];
         var hasTrailingSep = lastSentIdx < parts.length - 1;
         var hasEndingPunct = /[.!?。！？]["'”’)]?$/.test(lastPart.norm);
-        if (!(hasTrailingSep && hasEndingPunct)) {
+        if (!lastPart.endsCleanly && !(hasTrailingSep && hasEndingPunct)) {
           lastPart.committed = false;
         }
       }
@@ -1158,33 +1492,61 @@ const thoughtEngineRuntimeScript = `
     }
   }
 
-  function composeDisplay(parts, tempTailMap) {
+  function composeDisplayState(parts, tempTailMap, opts) {
+    var hideUntranslated = !!(opts && opts.hideUntranslated);
+    var failedKeys = opts && opts.failedKeys ? opts.failedKeys : null;
     var rendered = [];
+    var hasZhOutput = false;
+    var hasPending = false;
+
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i];
       if (p.kind !== 'sent' || !p.translatable) {
-        rendered.push({ kind: p.kind, text: p.text, isZh: /[\\u4e00-\\u9fa5]/.test(p.text) });
+        var nonSentZh = /[\\u4e00-\\u9fa5]/.test(p.text);
+        if (nonSentZh) hasZhOutput = true;
+        rendered.push({ kind: p.kind, text: p.text, isZh: nonSentZh });
         continue;
       }
       var zh = lookupSync(p.norm, p.key);
       if (!zh && !p.committed && tempTailMap && tempTailMap.has(p.key)) {
         zh = tempTailMap.get(p.key);
       }
-      rendered.push({ kind: 'sent', text: zh || p.text, isZh: !!zh || /[\\u4e00-\\u9fa5]/.test(p.text) });
+      if (zh) {
+        hasZhOutput = true;
+        rendered.push({ kind: 'sent', text: zh, isZh: true });
+      } else {
+        var isHardFailed = !!(failedKeys && typeof failedKeys.get === 'function' && (failedKeys.get(p.key) || 0) >= 2);
+        if (hideUntranslated && !isHardFailed) {
+          hasPending = true;
+          // 译文门控：未就绪英文句绝不上屏，等待中文译文到达后直接呈现
+          continue;
+        }
+        rendered.push({ kind: 'sent', text: p.text, isZh: /[\\u4e00-\\u9fa5]/.test(p.text) });
+      }
     }
+
+    // 清理被隐藏英文句留下的首尾悬空分隔符
+    while (rendered.length > 0 && rendered[0].kind === 'sep') rendered.shift();
+    while (rendered.length > 0 && rendered[rendered.length - 1].kind === 'sep') rendered.pop();
+
     var out = '';
     for (var j = 0; j < rendered.length; j++) {
       var cur = rendered[j];
-      if (cur.kind === 'sep' && /^[ \\t]+$/.test(cur.text)) {
+      if (cur.kind === 'sep') {
         var prev = j > 0 ? rendered[j - 1] : null;
         var next = j + 1 < rendered.length ? rendered[j + 1] : null;
-        if (prev && next && prev.isZh && next.isZh && /[。！？；：）】]$/.test(prev.text)) {
+        if (prev && prev.kind === 'sep') continue;
+        if (/^[ \\t]+$/.test(cur.text) && prev && next && prev.isZh && next.isZh && /[。！？；：）】]$/.test(prev.text)) {
           continue;
         }
       }
       out += cur.text;
     }
-    return out;
+    return { text: out, hasZhOutput: hasZhOutput, hasPending: hasPending };
+  }
+
+  function composeDisplay(parts, tempTailMap, opts) {
+    return composeDisplayState(parts, tempTailMap, opts).text;
   }
 
   async function requestBatch(items) {
@@ -1204,8 +1566,12 @@ const thoughtEngineRuntimeScript = `
     lookupSync: lookupSync,
     getCached: getCached,
     setCached: setCached,
+    getStepUiState: getStepUiState,
+    setStepUiState: setStepUiState,
+    getLastPointer: getLastPointer,
     splitThoughtSegments: splitThoughtSegments,
     composeDisplay: composeDisplay,
+    composeDisplayState: composeDisplayState,
     requestBatch: requestBatch
   };
 })();
@@ -1226,6 +1592,12 @@ const requiredOutputMarkers = [
   '__agyThoughtEngine',
   '/translate-thought',
   'thought-lang-toggle',
+  'thought-collapse-lock',
+  'data-agy-thought-wrap',
+  'getStepUiState',
+  'getLastPointer',
+  '正在同步中文思考过程…',
+  'defaultExpanded:_effectiveActive',
   '思考了 ',
   '已思考 '
 ];
