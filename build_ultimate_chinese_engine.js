@@ -1780,6 +1780,8 @@ const tableEngineRuntimeScript = `
 
   var DEFAULT_MIN_COL_CONTENT = 52;
   var FRAME_BORDER_SLACK = 4;
+  var RIGHT_EDGE_GAP_PX = 8;
+  var NARROW_RIGHT_EDGE_GAP_PX = 4;
   var WEIGHT_EXPONENT = 0.52;
   var MAX_SCROLL_COL_WIDTH = 260;
 
@@ -1986,17 +1988,21 @@ const tableEngineRuntimeScript = `
     var effectiveAvail = targetAvail;
     var hostBleedWidth = 0;
     var disableBleedTransform = false;
+    var baseSpan = capW > 0 ? capW : (parentW || targetAvail);
+    var rightGap = baseSpan >= 300 ? RIGHT_EDGE_GAP_PX : (baseSpan > 0 ? NARROW_RIGHT_EDGE_GAP_PX : 0);
+
     if (mode === 'column') {
       if (parentW > 0 && capW > parentW + 4) {
-        if (totalNeeded > parentW) {
-          hostBleedWidth = Math.floor(Math.min(totalNeeded, capW));
-          effectiveAvail = hostBleedWidth;
+        if (totalNeeded > parentW - rightGap) {
+          var maxBleed = Math.max(parentW, capW - rightGap * 2);
+          hostBleedWidth = Math.floor(Math.min(totalNeeded + rightGap, maxBleed));
+          effectiveAvail = Math.max(120, hostBleedWidth - rightGap);
         } else {
-          effectiveAvail = parentW;
+          effectiveAvail = Math.max(120, parentW - rightGap);
           disableBleedTransform = true;
         }
       } else {
-        effectiveAvail = capW > 0 ? capW : (parentW || targetAvail);
+        effectiveAvail = Math.max(120, baseSpan - rightGap);
         disableBleedTransform = true;
       }
     }
@@ -2006,10 +2012,12 @@ const tableEngineRuntimeScript = `
 
     if (mode === 'column') {
       if (disableBleedTransform) {
-        rules.push(selHost + '[data-width-mode="column"] { width: 100% !important; min-width: 0 !important; max-width: 100% !important; margin-inline-start: 0 !important; transform: none !important; }');
+        rules.push(selHost + '[data-width-mode="column"] { width: 100% !important; min-width: 0 !important; max-width: 100% !important; margin-inline-start: 0 !important; transform: none !important; box-sizing: border-box !important; padding-inline-end: ' + rightGap + 'px !important; }');
       } else if (hostBleedWidth > 0) {
-        rules.push(selHost + '[data-width-mode="column"] { width: ' + hostBleedWidth + 'px !important; }');
+        rules.push(selHost + '[data-width-mode="column"] { width: ' + hostBleedWidth + 'px !important; box-sizing: border-box !important; padding-inline-end: ' + rightGap + 'px !important; }');
       }
+    } else if (rightGap > 0) {
+      rules.push(selHost + '[data-width-mode="full"] { box-sizing: border-box !important; padding-inline-end: ' + rightGap + 'px !important; }');
     }
 
     var lastColTotal = layout.widths.length === n ? (layout.widths[n - 1] + cols[n - 1].chrome) : 0;
@@ -2054,6 +2062,8 @@ const tableEngineRuntimeScript = `
   window.__agyTableEngine = {
     DEFAULT_MIN_COL_CONTENT: DEFAULT_MIN_COL_CONTENT,
     FRAME_BORDER_SLACK: FRAME_BORDER_SLACK,
+    RIGHT_EDGE_GAP_PX: RIGHT_EDGE_GAP_PX,
+    NARROW_RIGHT_EDGE_GAP_PX: NARROW_RIGHT_EDGE_GAP_PX,
     WEIGHT_EXPONENT: WEIGHT_EXPONENT,
     computeColumnWidths: computeColumnWidths,
     buildTableCss: buildTableCss

@@ -208,21 +208,27 @@ async function runTests() {
         { natural: 1600, chrome: 25 }
       ];
 
-      // 1) 窄侧边栏 (parent=620, cap=620)
+      // 1) 窄侧边栏 (parent=620, cap=620)：右侧自动预留 8px 屏幕边缘安全间距，舒展且不空旷
       const narrowCss = eng.buildTableCss('t-narrow', cols, 620, 'column', { parentWidth: 620, capWidth: 620 });
       assert.strictEqual(narrowCss.canExpand, true);
       assert.ok(narrowCss.css.includes('[data-md-table="t-narrow"]:not([data-agy-measuring="1"]) > table { table-layout: fixed !important;'), 'fit 模式必须启用 table-layout: fixed 并隔离测量态');
       assert.ok(narrowCss.css.includes('padding-inline-end: 1.75rem;'), '末列表头应预留右上角 ⋮ 按钮空间防遮挡');
       assert.ok(narrowCss.css.includes('overflow-wrap: anywhere; word-break: break-word;'), '应启用长标识符/代码强制安全折行');
       assert.ok(narrowCss.css.includes('transform: none !important;'), '侧边栏不外溢时禁用 translateX');
+      assert.ok(narrowCss.css.includes('box-sizing: border-box !important; padding-inline-end: 8px !important;'), '表格右侧应对齐增加 8px 屏幕边缘安全留白');
 
-      // 2) 宽屏独立窗口 (parent=768, cap=1280)：自动居中舒展至 1280px 而不覆写官方 max-width reserve 过渡
+      // 2) 极窄视口 (parent=260, cap=260)：右侧安全留白温和收敛至 4px，不浪费空间
+      const tinyCss = eng.buildTableCss('t-tiny', cols, 260, 'column', { parentWidth: 260, capWidth: 260 });
+      assert.ok(tinyCss.css.includes('padding-inline-end: 4px !important;'), '极窄视口右侧安全留白应收敛至 4px');
+
+      // 3) 宽屏独立窗口 (parent=768, cap=1280)：居中舒展并保留屏幕边缘安全距(1280 - 16 = 1264px)，不覆写官方 max-width reserve 过渡
       const wideCss = eng.buildTableCss('t-wide', cols, 1280, 'column', { parentWidth: 768, capWidth: 1280 });
-      assert.ok(wideCss.css.includes('[data-md-table-host="t-wide"][data-width-mode="column"] { width: 1280px !important; }'), '宽屏超宽表应自动舒展至可视上限');
+      assert.ok(wideCss.css.includes('[data-md-table-host="t-wide"][data-width-mode="column"] { width: 1264px !important; box-sizing: border-box !important; padding-inline-end: 8px !important; }'), '宽屏超宽表应自动舒展并预留右侧安全距');
       assert.ok(!wideCss.css.includes('max-width: 100cqw !important'), '不可覆写官方 --md-table-end-reserve 动态 max-width 过渡');
 
-      // 3) full 展开全宽模式
+      // 4) full 展开全宽模式：同样预留右侧屏幕边缘安全留白
       const fullCss = eng.buildTableCss('t-full', cols, 620, 'full', { parentWidth: 620, capWidth: 620 });
+      assert.ok(fullCss.css.includes('[data-md-table-host="t-full"][data-width-mode="full"] { box-sizing: border-box !important; padding-inline-end: 8px !important; }'), 'full 模式也应保留右侧屏幕边缘安全距');
       assert.ok(fullCss.css.includes('min-width: min(1600px, 70ch); max-width: none;'), 'full 模式应允许用户按需展开查看原始全宽表');
       assert.ok(!fullCss.css.includes('table-layout: fixed'), 'full 模式不应锁定 table-layout: fixed');
     });
