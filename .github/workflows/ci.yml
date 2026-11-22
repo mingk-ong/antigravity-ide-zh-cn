@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check JS syntax & JSON validity
+        run: |
+          for f in build_ultimate_chinese_engine.js verify_all_14_screens.js verify_title_localization.js src/*.js; do
+            echo "Checking $f"
+            node -c "$f"
+          done
+          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); JSON.parse(require('fs').readFileSync('src/title_dicts.example.json','utf8')); console.log('JSON OK')"
+
+      - name: Check Python syntax
+        run: python -m py_compile tools/update_conversation_titles.py

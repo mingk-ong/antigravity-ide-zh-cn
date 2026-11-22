@@ -1,0 +1,9 @@
+{
+  "id_to_zh": {
+    "00000000-0000-0000-0000-000000000001": "示例：自定义会话中文标题"
+  },
+  "en_title_to_zh": {
+    "Change Software Language To Chinese": "软件界面中文化设置",
+    "Search Interface Conversation Title Localization": "搜索界面会话标题中文化"
+  }
+}

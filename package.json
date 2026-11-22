@@ -1,0 +1,34 @@
+{
+  "name": "antigravity-ide-zh-cn",
+  "version": "1.2.0",
+  "description": "Antigravity IDE 深度全量汉化、会话标题自动中文化、更新自愈与防损坏校验工具包",
+  "main": "src/patcher.js",
+  "scripts": {
+    "patch": "node src/patcher.js",
+    "verify": "node src/verifier.js",
+    "verify:screens": "node verify_all_14_screens.js",
+    "verify:titles": "node verify_title_localization.js",
+    "restore": "node src/restore.js"
+  },
+  "keywords": [
+    "antigravity",
+    "ide",
+    "chinese-patch",
+    "zh-cn",
+    "localization",
+    "checksum-protection"
+  ],
+  "author": {
+    "name": "mingk-ong",
+    "url": "https://github.com/mingk-ong"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mingk-ong/antigravity-ide-zh-cn.git"
+  },
+  "homepage": "https://github.com/mingk-ong/antigravity-ide-zh-cn#readme",
+  "bugs": {
+    "url": "https://github.com/mingk-ong/antigravity-ide-zh-cn/issues"
+  },
+  "license": "MIT"
+}

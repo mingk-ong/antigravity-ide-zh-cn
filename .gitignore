@@ -1,0 +1,22 @@
+# 官方闭源静态资源及编译产物（严禁提交）
+hub_main.js
+hub_main_zh.js
+*.bak
+
+# 个人会话标题字典与运行时翻译缓存（含隐私，仅保留本地）
+src/title_dicts.json
+src/title_cache.json
+
+# 日志与临时文件
+*.log
+logs/
+tools/debug_sync.log
+
+# 依赖与系统文件
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.env
+.env.*
