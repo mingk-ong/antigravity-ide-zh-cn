@@ -1,10 +1,12 @@
 /**
- * Antigravity IDE 统一核心注入、安全跨版本备份与特征指纹模块 (Core Injector & Shared Fingerprints)
+ * Antigravity IDE 统一核心注入、抗混淆定位器、跨版本安全备份与特征指纹模块
+ * (Core Injector, Anti-Obfuscation Locators & Shared Fingerprints)
  *
  * 设计目标：
- * - 让 patcher.js（手动部署）、auto_updater.js（更新自愈重注入）、verifier.js（生效审查）
- *   共享同一份真相源，彻底杜绝“新增功能漏接入自动更新/自检/审查”的漂移问题。
- * - 彻底解决官方版本升级后旧 .bak 覆盖新版官方文件导致内核错配的致命风险。
+ * 1. 让 patcher.js（手动部署）、auto_updater.js（更新自愈）、hub_proxy.js（热捕获同步）、verifier.js（生效审查）
+ *    共享同一份真相源，彻底杜绝功能漂移。
+ * 2. 全面采用结构化抗混淆定位器（不再写死易变的 Jv/Zw/yhn/est 等打包器重编号符号），大幅提升跨版本自动适配率。
+ * 3. 跨版本安全备份：官方更新覆盖新版原件后自动刷新 .bak，绝不用旧版 .bak 污染新版内核。
  */
 
 const fs = require('fs');
@@ -14,13 +16,14 @@ const {
   computeChecksum,
   computeFileSha256,
   getTargetPaths,
+  readDeployMeta,
   writeDeployMeta
 } = require('./config');
 const { agyCommandsMap } = require('./dictionary');
 const { loadCache } = require('./title_translator');
 
 // =========================================================================
-// 1. 全项目共享特征指纹常量（供自检、探针、审查共用）
+// 1. 全项目共享特征指纹常量与抗混淆正则（供自检、探针、审查共用）
 // =========================================================================
 
 const PROXY_REQUIRED_ENDPOINTS = [
@@ -29,6 +32,12 @@ const PROXY_REQUIRED_ENDPOINTS = [
   '/translate-thought',
   '/thought-cache-stats',
   '/thought-cache-clear'
+];
+
+const PROXY_RESILIENCE_MARKERS = [
+  'pruneProxyLogKeepLastRuns',
+  'ensureLiveMainSyncedAndCompiled',
+  'capturedHubAgyVersion'
 ];
 
 const THOUGHT_TRANSLATOR_REQUIRED_MARKERS = [
@@ -54,7 +63,6 @@ const HUB_ZH_THOUGHT_FEATURE_MARKERS = [
 ];
 
 const HUB_ZH_TITLE_FEATURE_MARKERS = [
-  'XB',
   '软件界面中文化设置',
   '__agyTitleAutoLocalizer',
   'updateConversationAnnotations',
@@ -73,38 +81,405 @@ const HUB_ZH_TABLE_FEATURE_MARKERS = [
   '表格选项'
 ];
 
+// extension.js 抗混淆定位器：动态捕获 4 参数名并用 bridge.js 前瞻锁死目标方法，彻底免疫 Jv -> Zw 等内部函数改名
 const EXTENSION_HOOK_MARKER = 'redirectIframeUrl';
-const EXTENSION_HOOK_TARGET = 'renderWebviewHtml(a,b,c,d){Jv(a);';
-const EXTENSION_HOOK_REPLACEMENT =
-  'renderWebviewHtml(a,b,c,d){try{c=require("../hub_proxy.js").redirectIframeUrl(c)}catch(_e){}Jv(a);';
+const EXTENSION_HOOK_REGEX =
+  /renderWebviewHtml\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{(?=[^{}]{0,260}asWebviewUri\([^)]{0,140}"bridge\.js")/;
 
-const WORKBENCH_YHN_TARGET = 'function yhn(t){return t?.annotations?.title?.trim()||t?.summary?.trim()||void 0}';
+// 外层 workbench / jetskiAgent 抗混淆定位器（均配合固定字面量 indexOf 窄窗口使用，杜绝 12-27MB 大文件正则回溯）
+const WORKBENCH_TITLE_FN_REGEX =
+  /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \2\?\.annotations\?\.title\?\.trim\(\)\|\|\2\?\.summary\?\.trim\(\)\|\|void 0\}/;
 const WORKBENCH_PATCHED_MARKER = '软件界面中文化设置';
 
-const JETSKI_EST_TARGET = 'function est(e){return e?.annotations?.title?.trim()||e?.summary?.trim()||void 0}';
-const JETSKI_UEN_TARGET = 'let h=u.summary||"Untitled Conversation";';
-const JETSKI_UEN_REPLACEMENT = 'let h=est(u)||u.summary||"Untitled Conversation";';
-const JETSKI_SMA_TARGET = 'item:{id:e.cascadeId,label:e.title,';
-const JETSKI_SMA_REPLACEMENT = 'item:{id:e.cascadeId,label:(est(e)||e.title),';
-const JETSKI_THOUGHT_PAIRS = [
-  ['n>=0?`Thinking for ${Math.max(1,n)}s`:"Thinking"', 'n>=0?`已思考 ${Math.max(1,n)} 秒`:"正在思考"'],
-  ['t?`Thought for ${Math.max(1,Number(t.seconds))}s`:"Thought Process"', 't?`思考了 ${Math.max(1,Number(t.seconds))} 秒`:"思考过程"'],
-  ['_?`Thought for ${Math.max(1,Number(_.seconds))}s`:"Thought Process"', '_?`思考了 ${Math.max(1,Number(_.seconds))} 秒`:"思考过程"'],
-  ['children:"Thinking..."', 'children:"正在思考..."']
-];
+const JETSKI_TITLE_FN_REGEX =
+  /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \2\?\.annotations\?\.title\?\.trim\(\)\|\|\2\?\.summary\?\.trim\(\)\|\|void 0\}/;
+const JETSKI_UEN_REGEX = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.summary\|\|"Untitled Conversation";/;
+const JETSKI_SMA_REGEX = /item:\{id:([A-Za-z_$][\w$]*)\.cascadeId,label:\1\.title,/;
+const JETSKI_THINKING_FOR_REGEX = /([A-Za-z_$][\w$]*)>=0\?`Thinking for \$\{Math\.max\(1,\1\)\}s`:"Thinking"/;
+const JETSKI_THOUGHT_FOR_REGEX = /([A-Za-z_$][\w$]*)\?`Thought for \$\{Math\.max\(1,Number\(\1\.seconds\)\)\}s`:"Thought Process"/;
+const JETSKI_THINKING_DOTS_TARGET = 'children:"Thinking..."';
 
-const JETSKI_PATCHED_MARKERS = [
-  '软件界面中文化设置',
-  'est(u)||u.summary',
-  'est(e)||e.title',
-  '已思考 ${Math.max(1,n)} 秒',
-  '思考了 ${Math.max(1,Number(t.seconds))} 秒',
-  'children:"正在思考..."'
-];
+/**
+ * 大文件毫秒级抗混淆正则匹配原语：
+ * 先用 V8 原生 SIMD indexOf 定位固定字面量锚点，再仅在极窄局部窗口内跑正则，
+ * 将 12~27MB bundle 上的耗时从几十秒降至 ~1-3ms，彻底消除正则回溯卡顿。
+ */
+function findByAnchorRegex(code, anchorStr, regex, backChars = 120, fwdChars = 160) {
+  if (typeof code !== 'string' || !anchorStr) return null;
+  let searchFrom = 0;
+  const localRe = new RegExp(regex.source, regex.flags.replace(/g/g, ''));
+  while (searchFrom < code.length) {
+    const idx = code.indexOf(anchorStr, searchFrom);
+    if (idx === -1) return null;
+    const winStart = Math.max(0, idx - backChars);
+    const winEnd = Math.min(code.length, idx + anchorStr.length + fwdChars);
+    const slice = code.slice(winStart, winEnd);
+    const m = localRe.exec(slice);
+    if (m) {
+      m.index = winStart + m.index;
+      return m;
+    }
+    searchFrom = idx + anchorStr.length;
+  }
+  return null;
+}
+
+/**
+ * 大文件毫秒级全局替换原语（配合固定字面量锚点窄窗口）
+ */
+function replaceAllByAnchorRegex(code, anchorStr, regex, replacer, backChars = 80, fwdChars = 120) {
+  if (typeof code !== 'string' || !anchorStr) return { code, count: 0 };
+  let out = code;
+  let count = 0;
+  let searchFrom = 0;
+  const localRe = new RegExp(regex.source, regex.flags.replace(/g/g, ''));
+  while (searchFrom < out.length) {
+    const idx = out.indexOf(anchorStr, searchFrom);
+    if (idx === -1) break;
+    const winStart = Math.max(0, idx - backChars);
+    const winEnd = Math.min(out.length, idx + anchorStr.length + fwdChars);
+    const slice = out.slice(winStart, winEnd);
+    const m = localRe.exec(slice);
+    if (m) {
+      const absStart = winStart + m.index;
+      const absEnd = absStart + m[0].length;
+      const rep = typeof replacer === 'function' ? replacer(m) : replacer;
+      out = out.slice(0, absStart) + rep + out.slice(absEnd);
+      count++;
+      searchFrom = absStart + rep.length;
+    } else {
+      searchFrom = idx + anchorStr.length;
+    }
+  }
+  return { code: out, count };
+}
+
+/**
+ * 精准 JS 花括号深度匹配扫描器（跳过单/双引号与模板字符串中的伪括号）
+ * 用于精确找到任意组件函数体的闭合位置，彻底告别写死 ";var jAc=" / "var nkc=" 等邻接函数名
+ */
+function findMatchingBraceEnd(code, openBraceIdx) {
+  if (typeof code !== 'string' || openBraceIdx < 0 || code[openBraceIdx] !== '{') return -1;
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let i = openBraceIdx; i < code.length; i++) {
+    const ch = code[i];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 模块 A-RPC 抗混淆定位器（会话标题原生 RPC 自动持久化守卫，兼容 1.11.0 vcc / 1.12.0 sjc 及任意混淆名）
+ */
+function locateTitleRpcModule(code) {
+  if (typeof code !== 'string') return { matched: false, reason: '无效源码' };
+  const anchorIdx = code.indexOf('getStartingConversationIds:()=>');
+  if (anchorIdx === -1) {
+    return { matched: false, reason: '未找到 getStartingConversationIds 锚点' };
+  }
+  const winStart = Math.max(0, anchorIdx - 360);
+  const winEnd = Math.min(code.length, anchorIdx + 120);
+  const win = code.slice(winStart, winEnd);
+
+  const compMatch = /var ([A-Za-z_$][\w$]*)=\(\)=>\{[^}]*?\{updateConversationAnnotations:([A-Za-z_$][\w$]*)\}=[A-Za-z_$][\w$]*\(\)[^;]*;\(0,([A-Za-z_$][\w$]*)\.useEffect\)/.exec(win);
+  if (!compMatch) {
+    return { matched: false, reason: '未匹配到 updateConversationAnnotations 挂载组件签名' };
+  }
+  const dispatchMatch = /dispatch:([A-Za-z_$][\w$]*)\.dispatch/.exec(win);
+  const startingMatch = /getStartingConversationIds:\(\)=>([A-Za-z_$][\w$]*)\(/.exec(win);
+  if (!dispatchMatch || !startingMatch) {
+    return { matched: false, reason: '未捕获到 store.dispatch 或 getStartingConversationIds 符号' };
+  }
+
+  // 在整包中通过固定语义串提取 protobuf 构造器、schema 命名空间及本地 Redux 更新 action
+  const pbMatch = findByAnchorRegex(
+    code,
+    '.ConversationAnnotationsSchema,{markedAsUnread:',
+    /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.ConversationAnnotationsSchema,\{markedAsUnread:/,
+    30,
+    20
+  );
+  const actionMatch = findByAnchorRegex(
+    code,
+    ',annotations:{markedAsUnread:!1}}))',
+    /\.dispatch\(([A-Za-z_$][\w$]*)\(\{cascadeId:[A-Za-z_$][\w$]*,annotations:\{markedAsUnread:!1\}\}\)\)/,
+    60,
+    20
+  );
+  if (!pbMatch || !actionMatch) {
+    return { matched: false, reason: '未捕获到 ConversationAnnotationsSchema 构造器或 Redux action 符号' };
+  }
+
+  const effectRelIdx = compMatch[0].indexOf(`(0,${compMatch[3]}.useEffect)`);
+  const insertPos = winStart + compMatch.index + effectRelIdx;
+
+  return {
+    matched: true,
+    insertPos,
+    compName: compMatch[1],
+    rpcVar: compMatch[2],
+    reactVar: compMatch[3],
+    storeVar: dispatchMatch[1],
+    startingFn: startingMatch[1],
+    createFn: pbMatch[1],
+    pbMod: pbMatch[2],
+    patchActionFn: actionMatch[1]
+  };
+}
+
+/**
+ * 模块 B 抗混淆定位器（思维链实时流式翻译与悬停小锁，兼容 1.11.0 iAc / 1.12.0 rTc 及任意混淆名）
+ */
+function locateThoughtModule(code) {
+  if (typeof code !== 'string') return { matched: false, reason: '无效源码' };
+  const triggerIdx = code.indexOf('dataTestId:"thinking-collapsible-trigger"');
+  if (triggerIdx === -1) {
+    return { matched: false, reason: '未找到 thinking-collapsible-trigger 锚点' };
+  }
+  const searchStart = Math.max(0, triggerIdx - 1400);
+  const preSlice = code.slice(searchStart, triggerIdx);
+  const headMatch = /var ([A-Za-z_$][\w$]*)=\(\{thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f\}\)=>\{/.exec(preSlice);
+  if (!headMatch) {
+    return { matched: false, reason: '未匹配到思维链组件参数签名' };
+  }
+  const startIdx = searchStart + headMatch.index;
+  const openBraceIdx = startIdx + headMatch[0].length - 1;
+  const closeBraceIdx = findMatchingBraceEnd(code, openBraceIdx);
+  if (closeBraceIdx === -1) {
+    return { matched: false, reason: '思维链组件花括号未闭合' };
+  }
+  const endIdx = code[closeBraceIdx + 1] === ';' ? closeBraceIdx + 2 : closeBraceIdx + 1;
+  const body = code.slice(startIdx, endIdx);
+
+  const reactMatch = /([A-Za-z_$][\w$]*)\.createElement\("div"/.exec(body);
+  const ctxMatch = /verboseAgentChat:h\}=([A-Za-z_$][\w$]*)\(\)/.exec(body);
+  const runMatch = /=([A-Za-z_$][\w$]*)\(\)===([A-Za-z_$][\w$]*)\.CascadeRunStatus\.RUNNING/.exec(body);
+  const stepStatusOk = runMatch && body.includes(`${runMatch[2]}.CortexStepStatus.RUNNING`) && body.includes(`${runMatch[2]}.CortexStepStatus.GENERATING`);
+  const animMatch = /(?:var\s+|,)n=([A-Za-z_$][\w$]*)\(\)/.exec(body);
+  const featMatch = /=([A-Za-z_$][\w$]*)\(\);[^;]*get\("conversationView"\)\?\.trajectorySteering/.exec(body);
+  const shimmerMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{active:m/.exec(body);
+  const headerMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{metadata:c,doneText:/.exec(body);
+  const collapseMatch = /return [A-Za-z_$][\w$]*\.createElement\(([A-Za-z_$][\w$]*),\{trigger:/.exec(body);
+
+  const missing = [];
+  if (!reactMatch) missing.push('reactVar');
+  if (!ctxMatch) missing.push('ctxHook');
+  if (!runMatch) missing.push('runStatusHook/enumObj');
+  if (!stepStatusOk) missing.push('CortexStepStatus');
+  if (!animMatch) missing.push('animHook');
+  if (!shimmerMatch) missing.push('shimmerComp');
+  if (!headerMatch) missing.push('headerComp');
+  if (!collapseMatch) missing.push('collapseComp');
+
+  if (missing.length > 0) {
+    return { matched: false, reason: `缺少内部符号: ${missing.join(', ')}` };
+  }
+
+  return {
+    matched: true,
+    startIdx,
+    endIdx,
+    compName: headMatch[1],
+    reactVar: reactMatch[1],
+    ctxHook: ctxMatch[1],
+    runStatusHook: runMatch[1],
+    enumObj: runMatch[2],
+    animHook: animMatch[1],
+    featHook: featMatch ? featMatch[1] : '',
+    shimmerComp: shimmerMatch[1],
+    headerComp: headerMatch[1],
+    collapseComp: collapseMatch[1]
+  };
+}
+
+/**
+ * 模块 C 抗混淆定位器（Markdown 表格智能自适应与菜单汉化，兼容 1.11.0 ckc-mkc / 1.12.0 Crc-Mrc 及任意混淆名）
+ */
+function locateTableModule(code) {
+  if (typeof code !== 'string') return { matched: false, reason: '无效源码' };
+  const pillCssTarget = 'min-width: calc-size(max-content, min(size, 20ch));';
+  const hasPillCss = code.includes(pillCssTarget);
+
+  // 1. 定位测量与分配函数组 (ckc/dkc/ekc 或 Crc/Drc/Erc)
+  const measureMatch = findByAnchorRegex(
+    code,
+    'querySelector(":scope > table")',
+    /function ([A-Za-z_$][\w$]*)\(a\)\{var b=a\.querySelector\(":scope > table"\);/,
+    40,
+    20
+  );
+  if (!measureMatch) {
+    return { matched: false, reason: '未找到表格列宽测量函数 (:scope > table)' };
+  }
+  const measureStart = measureMatch.index;
+  const measureFn = measureMatch[1];
+
+  const tailAfterMeasure = code.slice(measureStart, measureStart + 2500);
+  const allocMatch = /function ([A-Za-z_$][\w$]*)\(a,b\)\{var c=new Map;/.exec(tailAfterMeasure);
+  const eqMatch = /function ([A-Za-z_$][\w$]*)\(a,b\)\{return a\.length===b\.length/.exec(tailAfterMeasure);
+  if (!allocMatch || !eqMatch) {
+    return { matched: false, reason: '未找到表格分配或相等比较函数 (dkc/ekc)' };
+  }
+  const allocFn = allocMatch[1];
+  const eqFn = eqMatch[1];
+  const eqStart = measureStart + eqMatch.index;
+
+  // 2. 定位主表格组件 (lkc / Lrc) 与操作菜单组件 (mkc / Mrc)
+  const tableMatch = findByAnchorRegex(
+    code,
+    '({node:a,staggerStyle:b,...c}){',
+    /function ([A-Za-z_$][\w$]*)\(\{node:a,staggerStyle:b,\.\.\.c\}\)\{/,
+    40,
+    20
+  );
+  if (!tableMatch) {
+    return { matched: false, reason: '未找到 Markdown 表格主渲染组件签名' };
+  }
+  const tableStart = tableMatch.index;
+  const tableComp = tableMatch[1];
+
+  const menuWin = code.slice(tableStart, tableStart + 8000);
+  const menuMatch = /function ([A-Za-z_$][\w$]*)\(\{widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d\}\)\{/.exec(menuWin);
+  if (!menuMatch) {
+    return { matched: false, reason: '未找到 Markdown 表格操作菜单组件签名' };
+  }
+  const menuComp = menuMatch[1];
+  const menuStartAbs = tableStart + menuMatch.index;
+  const menuOpenBrace = menuStartAbs + menuMatch[0].length - 1;
+  const menuCloseBrace = findMatchingBraceEnd(code, menuOpenBrace);
+  if (menuCloseBrace === -1) {
+    return { matched: false, reason: '表格菜单组件花括号未闭合' };
+  }
+  const menuEnd = code[menuCloseBrace + 1] === ';' ? menuCloseBrace + 2 : menuCloseBrace + 1;
+  const body = code.slice(tableStart, menuEnd);
+
+  // 3. 动态提取内部全部耦合 UI 与工具符号
+  const reactMatch = /\(0,([A-Za-z_$][\w$]*)\.useRef\)\(null\)/.exec(body);
+  const bleedMatch = /\((?:[A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(L\)\)&&[A-Za-z_$][\w$]*\.observe\(/.exec(body) ||
+    /var [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\(L\),/.exec(body);
+  const cnMatch = /className:([A-Za-z_$][\w$]*)\("group\/md-table/.exec(body);
+  const toMdMatch = /getMarkdown:\(\)=>g\.current\?([A-Za-z_$][\w$]*)\(g\.current\):""/.exec(body);
+  const maskMatch = /style:([A-Za-z_$][\w$]*)\(w\)/.exec(body);
+  const copyMatch = /\{copied:h,copy:k\}=([A-Za-z_$][\w$]*)\(\)/.exec(body);
+  const menuRootMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{open:f,onOpenChange:g\}/.exec(body);
+  const menuTriggerMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{asChild:!0\}/.exec(body);
+  const btnMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{variant:"muted",size:"custom"/.exec(body);
+  const iconMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{name:h\?"check":"more_vert"/.exec(body);
+  const menuContentMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{side:"bottom",align:"end"/.exec(body);
+  const menuItemMatch = /\.createElement\(([A-Za-z_$][\w$]*),\{onClick:\(\)=>\{k\(d\(\)\);g\(!1\)\}/.exec(body);
+
+  const missing = [];
+  if (!reactMatch) missing.push('reactVar');
+  if (!bleedMatch) missing.push('bleedFn');
+  if (!cnMatch) missing.push('cnFn');
+  if (!toMdMatch) missing.push('toMdFn');
+  if (!maskMatch) missing.push('maskFn');
+  if (!copyMatch) missing.push('copyHook');
+  if (!menuRootMatch) missing.push('menuRoot');
+  if (!menuTriggerMatch) missing.push('menuTrigger');
+  if (!btnMatch) missing.push('btnComp');
+  if (!iconMatch) missing.push('iconComp');
+  if (!menuContentMatch) missing.push('menuContent');
+  if (!menuItemMatch) missing.push('menuItem');
+  if (!hasPillCss) missing.push('.inline-pill-wrap(20ch)');
+
+  if (missing.length > 0) {
+    return { matched: false, reason: `缺少内部符号: ${missing.join(', ')}` };
+  }
+
+  return {
+    matched: true,
+    measureStart,
+    eqStart,
+    tableStart,
+    menuEnd,
+    measureFn,
+    allocFn,
+    eqFn,
+    tableComp,
+    menuComp,
+    reactVar: reactMatch[1],
+    bleedFn: bleedMatch[1],
+    cnFn: cnMatch[1],
+    toMdFn: toMdMatch[1],
+    maskFn: maskMatch[1],
+    copyHook: copyMatch[1],
+    menuRoot: menuRootMatch[1],
+    menuTrigger: menuTriggerMatch[1],
+    btnComp: btnMatch[1],
+    iconComp: iconMatch[1],
+    menuContent: menuContentMatch[1],
+    menuItem: menuItemMatch[1],
+    hasPillCss,
+    pillCssTarget
+  };
+}
 
 // =========================================================================
-// 2. 跨版本安全备份与状态判定工具
+// 2. 抗混淆定位与注入原语
 // =========================================================================
+
+/**
+ * 探测 extension.js 中的 Webview 代理注入点（抗混淆版本，免疫内部 helper 改名）
+ */
+function locateExtensionWebviewHook(extCode) {
+  if (typeof extCode !== 'string' || !extCode) {
+    return { matched: false, alreadyHooked: false, offset: -1, urlArg: '', signature: '' };
+  }
+  const hookedIdx = extCode.indexOf(EXTENSION_HOOK_MARKER);
+  if (hookedIdx !== -1 && extCode.includes('hub_proxy')) {
+    return { matched: true, alreadyHooked: true, offset: hookedIdx, urlArg: '', signature: EXTENSION_HOOK_MARKER };
+  }
+  const m = EXTENSION_HOOK_REGEX.exec(extCode);
+  if (m) {
+    return {
+      matched: true,
+      alreadyHooked: false,
+      offset: m.index,
+      urlArg: m[3],
+      signature: m[0]
+    };
+  }
+  return { matched: false, alreadyHooked: false, offset: -1, urlArg: '', signature: '' };
+}
+
+/**
+ * 向 extension.js 动态注入 Webview 代理重定向钩子
+ */
+function injectExtensionWebviewHook(extCode) {
+  const loc = locateExtensionWebviewHook(extCode);
+  if (!loc.matched) {
+    return { ok: false, changed: false, code: extCode, reason: '未匹配到 renderWebviewHtml(..., bridge.js) 方法签名' };
+  }
+  if (loc.alreadyHooked) {
+    return { ok: true, changed: false, code: extCode, alreadyHooked: true };
+  }
+  const insertPos = loc.offset + loc.signature.length;
+  const injection = `try{${loc.urlArg}=require("../hub_proxy.js").redirectIframeUrl(${loc.urlArg})}catch(_e){}`;
+  const patched = extCode.slice(0, insertPos) + injection + extCode.slice(insertPos);
+  return { ok: true, changed: true, code: patched, urlArg: loc.urlArg, offset: loc.offset };
+}
 
 function isAgyPackageLocalized(pkgContent) {
   try {
@@ -142,17 +517,48 @@ function isAgyPackageHasAnyLocalized(pkgContent) {
 }
 
 function isWorkbenchPatched(content) {
-  return typeof content === 'string' && content.includes(WORKBENCH_PATCHED_MARKER) && !content.includes(WORKBENCH_YHN_TARGET);
+  return (
+    typeof content === 'string' &&
+    content.includes(WORKBENCH_PATCHED_MARKER) &&
+    !findByAnchorRegex(content, '?.annotations?.title?.trim()', WORKBENCH_TITLE_FN_REGEX, 60, 120)
+  );
 }
 
 function isJetskiPatched(content) {
   if (typeof content !== 'string') return false;
-  return JETSKI_PATCHED_MARKERS.every(m => content.includes(m));
+  if (!content.includes(WORKBENCH_PATCHED_MARKER)) return false;
+  const hasUen = Boolean(
+    findByAnchorRegex(
+      content,
+      '||"Untitled Conversation"',
+      /[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\|\|[A-Za-z_$][\w$]*\.summary\|\|"Untitled Conversation"/,
+      60,
+      20
+    )
+  );
+  const hasSma = Boolean(
+    findByAnchorRegex(
+      content,
+      '.cascadeId,label:(',
+      /label:\([A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\|\|[A-Za-z_$][\w$]*\.title\)/,
+      20,
+      80
+    )
+  );
+  const hasThoughts =
+    content.includes('已思考 ${Math.max(1,') &&
+    content.includes('思考了 ${Math.max(1,Number(') &&
+    content.includes('children:"正在思考..."');
+  return hasUen && hasSma && hasThoughts;
 }
 
 function isJetskiHasAnyPatch(content) {
   if (typeof content !== 'string') return false;
-  return content.includes(WORKBENCH_PATCHED_MARKER) || content.includes('est(u)||u.summary') || content.includes('已思考 ${Math.max(1,n)} 秒');
+  return (
+    content.includes(WORKBENCH_PATCHED_MARKER) ||
+    content.includes('已思考 ${Math.max(1,') ||
+    content.includes('children:"正在思考..."')
+  );
 }
 
 function filesAreIdentical(fileA, fileB) {
@@ -165,7 +571,7 @@ function filesAreIdentical(fileA, fileB) {
 }
 
 /**
- * 解析当前可用的官方 Hub 静态源 hub_main.js（优先扩展目录最新提取源，否则回退项目根目录源）
+ * 解析当前可用的官方 Hub 静态源 hub_main.js（优先扩展目录最新捕获源，否则回退项目根目录源）
  */
 function resolveHubSourcePath(agyExtDir, patchDir) {
   const livePath = path.join(agyExtDir, 'hub_main.js');
@@ -175,17 +581,61 @@ function resolveHubSourcePath(agyExtDir, patchDir) {
 }
 
 /**
- * 读取当前已安装 Antigravity IDE 的版本号与构建 distro 标识
+ * 读取当前已安装 Antigravity IDE 的完整 4 维版本身份：
+ * - appVersion / distro（VS Code 基座）
+ * - ideVersion（Antigravity IDE 上层版本，来自 product.json）
+ * - agyVersion（核心 agy 扩展版本，来自 extensions/agy/package.json）
  */
 function readInstalledAppIdentity(appDir) {
+  const result = {
+    appVersion: '',
+    distro: '',
+    ideVersion: '',
+    agyVersion: ''
+  };
+  if (!appDir) return result;
+
   const pkgPath = path.join(appDir, 'package.json');
-  if (!fs.existsSync(pkgPath)) return { appVersion: '', distro: '' };
-  try {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    return { appVersion: pkg.version || '', distro: pkg.distro || '' };
-  } catch (_e) {
-    return { appVersion: '', distro: '' };
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      result.appVersion = pkg.version || '';
+      result.distro = pkg.distro || '';
+    } catch (_e) {}
   }
+
+  const productPath = path.join(appDir, 'product.json');
+  if (fs.existsSync(productPath)) {
+    try {
+      const prod = JSON.parse(fs.readFileSync(productPath, 'utf8'));
+      result.ideVersion = prod.ideVersion || prod.antigravityVersion || '';
+    } catch (_e) {}
+  }
+
+  const agyPkgPath = path.join(appDir, 'extensions', 'agy', 'package.json');
+  if (fs.existsSync(agyPkgPath)) {
+    try {
+      const agyPkg = JSON.parse(fs.readFileSync(agyPkgPath, 'utf8'));
+      result.agyVersion = agyPkg.version || '';
+    } catch (_e) {}
+  }
+
+  return result;
+}
+
+/**
+ * 格式化可读的版本展示串
+ */
+function formatAppIdentity(identity) {
+  if (!identity) return '未知版本';
+  const parts = [];
+  if (identity.ideVersion) parts.push(`IDE v${identity.ideVersion}`);
+  if (identity.agyVersion) parts.push(`agy v${identity.agyVersion}`);
+  const vsPart = identity.appVersion
+    ? `VS Code v${identity.appVersion}${identity.distro ? ` / ${String(identity.distro).slice(0, 10)}` : ''}`
+    : '';
+  if (vsPart) parts.push(`(${vsPart})`);
+  return parts.length > 0 ? parts.join(' ') : '未知版本';
 }
 
 /**
@@ -212,7 +662,6 @@ function ensureFreshBackup(filePath, isPatchedPredicate, logger) {
       return { existed: true, refreshed: true, backupPath };
     }
   } else if (!fs.existsSync(backupPath)) {
-    // 线上文件已打补丁但缺少 .bak 时不覆写，避免把已补丁文件错当官方原件
     return { existed: true, refreshed: false, backupPath, missingBackup: true };
   }
 
@@ -220,7 +669,7 @@ function ensureFreshBackup(filePath, isPatchedPredicate, logger) {
 }
 
 /**
- * 构造注入 workbench yhn / jetskiAgent est 的会话标题中文化引擎代码
+ * 构造注入 workbench / jetskiAgent 的会话标题中文化引擎代码（支持动态函数名）
  */
 function buildZhTitleEngine(funcName) {
   const merged = loadCache();
@@ -350,6 +799,104 @@ function buildZhTitleEngine(funcName) {
 }
 
 /**
+ * 抗混淆注入 workbench.desktop.main.js（窄窗口锚点匹配，~2ms 完成，不再写死 yhn）
+ */
+function patchWorkbenchContent(wbCode) {
+  const m = findByAnchorRegex(wbCode, '?.annotations?.title?.trim()', WORKBENCH_TITLE_FN_REGEX, 60, 120);
+  if (m) {
+    const fnName = m[1];
+    const patched = wbCode.slice(0, m.index) + buildZhTitleEngine(fnName) + wbCode.slice(m.index + m[0].length);
+    return { ok: true, changed: true, fnName, code: patched };
+  }
+  if (isWorkbenchPatched(wbCode)) {
+    return { ok: true, changed: false, fnName: '', code: wbCode };
+  }
+  return { ok: false, changed: false, fnName: '', code: wbCode };
+}
+
+/**
+ * 抗混淆注入 jetskiAgent/main.js（窄窗口锚点匹配，~3ms 完成，动态捕获函数与变量名）
+ */
+function patchJetskiContent(jkCode) {
+  let code = jkCode;
+  let changed = false;
+  let fnName = '';
+  let uenHit = false;
+  let smaHit = false;
+  let thoughtHits = 0;
+
+  const fnMatch = findByAnchorRegex(code, '?.annotations?.title?.trim()', JETSKI_TITLE_FN_REGEX, 60, 120);
+  if (fnMatch) {
+    fnName = fnMatch[1];
+    code = code.slice(0, fnMatch.index) + buildZhTitleEngine(fnName) + code.slice(fnMatch.index + fnMatch[0].length);
+    changed = true;
+  }
+
+  if (fnName) {
+    const uenMatch = findByAnchorRegex(code, '.summary||"Untitled Conversation";', JETSKI_UEN_REGEX, 40, 20);
+    if (uenMatch) {
+      const rep = `let ${uenMatch[1]}=${fnName}(${uenMatch[2]})||${uenMatch[2]}.summary||"Untitled Conversation";`;
+      code = code.slice(0, uenMatch.index) + rep + code.slice(uenMatch.index + uenMatch[0].length);
+      uenHit = true;
+      changed = true;
+    }
+
+    const smaMatch = findByAnchorRegex(code, '.cascadeId,label:', JETSKI_SMA_REGEX, 40, 50);
+    if (smaMatch) {
+      const rep = `item:{id:${smaMatch[1]}.cascadeId,label:(${fnName}(${smaMatch[1]})||${smaMatch[1]}.title),`;
+      code = code.slice(0, smaMatch.index) + rep + code.slice(smaMatch.index + smaMatch[0].length);
+      smaHit = true;
+      changed = true;
+    }
+  }
+
+  const r1 = replaceAllByAnchorRegex(
+    code,
+    '>=0?`Thinking for ${Math.max(1,',
+    JETSKI_THINKING_FOR_REGEX,
+    (m) => `${m[1]}>=0?\`已思考 \${Math.max(1,${m[1]})} 秒\`:"正在思考"`,
+    24,
+    80
+  );
+  if (r1.count > 0) {
+    code = r1.code;
+    thoughtHits += r1.count;
+    changed = true;
+  }
+
+  const r2 = replaceAllByAnchorRegex(
+    code,
+    '?`Thought for ${Math.max(1,Number(',
+    JETSKI_THOUGHT_FOR_REGEX,
+    (m) => `${m[1]}?\`思考了 \${Math.max(1,Number(${m[1]}.seconds))} 秒\`:"思考过程"`,
+    24,
+    90
+  );
+  if (r2.count > 0) {
+    code = r2.code;
+    thoughtHits += r2.count;
+    changed = true;
+  }
+
+  if (code.includes(JETSKI_THINKING_DOTS_TARGET)) {
+    const parts = code.split(JETSKI_THINKING_DOTS_TARGET);
+    thoughtHits += parts.length - 1;
+    code = parts.join('children:"正在思考..."');
+    changed = true;
+  }
+
+  return {
+    ok: changed || isJetskiPatched(code),
+    changed,
+    fnName,
+    uenHit,
+    smaHit,
+    thoughtHits,
+    code
+  };
+}
+
+/**
  * 安全清理 Electron V8 字节码缓存（忽略被运行中进程占用的文件，不强杀 IDE）
  */
 function safelyClearV8Cache(cachedDataDir, logger) {
@@ -372,6 +919,19 @@ function safelyClearV8Cache(cachedDataDir, logger) {
     logger(`✔ [缓存清理] 已安全清理 V8 字节码缓存 ${cleared} 项${skipped > 0 ? `（跳过正在占用的 ${skipped} 项）` : ''}`);
   }
   return { cleared, skipped };
+}
+
+/**
+ * 读取 build_ultimate_chinese_engine.js 产出的模块状态报告（供分级降级诊断使用）
+ */
+function parseBuildModuleReport(agyExtDir) {
+  const reportPath = path.join(agyExtDir, '.agy_build_report.json');
+  if (!fs.existsSync(reportPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  } catch (_e) {
+    return null;
+  }
 }
 
 /**
@@ -401,9 +961,8 @@ function applyAllPatches(options = {}) {
   const localHubMainPath = path.join(patchDir, 'hub_main.js');
   const wbPath = path.join(outDir, 'vs', 'workbench', 'workbench.desktop.main.js');
   const jkPath = path.join(outDir, 'jetskiAgent', 'main.js');
-  const pkgJsonPath = path.join(appDir, 'package.json');
 
-  // 1. 同步官方最新版静态资产 hub_main.js（避免旧工作区缓存遮蔽新版本官方原件）
+  // 1. 同步扩展目录中最新捕获的官方 hub_main.js（避免旧工作区缓存遮蔽新版本原件）
   if (fs.existsSync(liveHubMainPath)) {
     if (!fs.existsSync(localHubMainPath) || !filesAreIdentical(liveHubMainPath, localHubMainPath)) {
       fs.copyFileSync(liveHubMainPath, localHubMainPath);
@@ -413,11 +972,10 @@ function applyAllPatches(options = {}) {
 
   // 2. 跨版本安全备份关键文件（若检测到官方新版覆盖，自动刷新 .bak）
   const extBackupInfo = ensureFreshBackup(extJsPath, c => c.includes(EXTENSION_HOOK_MARKER), logger);
-  const pkgBackupInfo = ensureFreshBackup(agyExtPackagePath, isAgyPackageHasAnyLocalized, logger);
+  ensureFreshBackup(agyExtPackagePath, isAgyPackageHasAnyLocalized, logger);
   const wbBackupInfo = ensureFreshBackup(wbPath, isWorkbenchPatched, logger);
   const jkBackupInfo = ensureFreshBackup(jkPath, isJetskiHasAnyPatch, logger);
 
-  // 若核心内核文件刚刷新了官方原件备份，则同步刷新 product.json.bak
   const anyCoreRefreshed = extBackupInfo.refreshed || wbBackupInfo.refreshed || jkBackupInfo.refreshed;
   if (fs.existsSync(productJsonPath)) {
     const prodBak = productJsonPath + '.bak';
@@ -456,13 +1014,14 @@ function applyAllPatches(options = {}) {
     }
   }
 
-  // 4. 调用唯一权威构建脚本编译并部署 hub_main_zh.js
+  // 4. 调用唯一权威构建脚本编译并部署 hub_main_zh.js（内置抗混淆动态定位 + 分级韧性模块容错 + 语法预检）
   const ultimateBuildScript = path.join(patchDir, 'build_ultimate_chinese_engine.js');
   if (!fs.existsSync(ultimateBuildScript)) {
     throw new Error('未找到终极构建脚本: ' + ultimateBuildScript);
   }
   logger('\n[Hub] 调用终极权威引擎构建并部署 hub_main_zh.js...');
   execSync(`"${process.execPath}" "${ultimateBuildScript}"`, { cwd: patchDir, stdio });
+  const buildReport = parseBuildModuleReport(agyExtDir);
 
   // 5. 同步代理与双翻译微服务
   const syncPairs = [
@@ -481,73 +1040,47 @@ function applyAllPatches(options = {}) {
     }
   }
 
-  // 6. 注入 extension.js Webview 代理重定向钩子
+  // 6. 抗混淆注入 extension.js Webview 代理重定向钩子（自动兼容 Jv/Zw 等任意混淆名）
   if (fs.existsSync(extJsPath)) {
-    let extContent = fs.readFileSync(extJsPath, 'utf8');
-    if (!extContent.includes(EXTENSION_HOOK_MARKER)) {
-      if (extContent.includes(EXTENSION_HOOK_TARGET)) {
-        extContent = extContent.replace(EXTENSION_HOOK_TARGET, EXTENSION_HOOK_REPLACEMENT);
-        fs.writeFileSync(extJsPath, extContent, 'utf8');
-        logger('✔ [扩展] 已成功注入 Webview 代理拦截重定向钩子');
-      } else {
-        logger('⚠ [扩展] 未定位到 renderWebviewHtml 注入锚点，跳过');
-      }
-    } else {
+    const extContent = fs.readFileSync(extJsPath, 'utf8');
+    const hookRes = injectExtensionWebviewHook(extContent);
+    if (hookRes.ok && hookRes.changed) {
+      fs.writeFileSync(extJsPath, hookRes.code, 'utf8');
+      logger(`✔ [扩展] 已通过抗混淆定位器注入 Webview 代理重定向钩子 (URL 参数: ${hookRes.urlArg}, 偏移: ${hookRes.offset})`);
+    } else if (hookRes.ok && hookRes.alreadyHooked) {
       logger('✔ [扩展] Webview 代理钩子已存在，无需重复注入');
+    } else {
+      throw new Error(`未能在 extension.js 中定位 renderWebviewHtml 注入锚点: ${hookRes.reason}`);
     }
   }
 
-  // 7. 会话标题双核注入：workbench.desktop.main.js
+  // 7. 抗混淆注入外层 workbench.desktop.main.js
   if (fs.existsSync(wbPath)) {
     const wbSrcPath = fs.existsSync(wbPath + '.bak') ? wbPath + '.bak' : wbPath;
-    let wbCode = fs.readFileSync(wbSrcPath, 'utf8');
-    if (wbCode.includes(WORKBENCH_YHN_TARGET)) {
-      wbCode = wbCode.replace(WORKBENCH_YHN_TARGET, buildZhTitleEngine('yhn'));
-      fs.writeFileSync(wbPath, wbCode, 'utf8');
-      logger('✔ [会话标题] 已成功注入 workbench 标题输出枢纽 yhn(t)');
-    } else if (isWorkbenchPatched(wbCode)) {
-      logger('✔ [会话标题] workbench 标题输出枢纽 yhn(t) 已就绪');
+    const wbCode = fs.readFileSync(wbSrcPath, 'utf8');
+    const wbRes = patchWorkbenchContent(wbCode);
+    if (wbRes.ok && wbRes.changed) {
+      fs.writeFileSync(wbPath, wbRes.code, 'utf8');
+      logger(`✔ [会话标题] 已成功注入 workbench 标题输出枢纽 ${wbRes.fnName}(t)`);
+    } else if (wbRes.ok) {
+      logger('✔ [会话标题] workbench 标题输出枢纽已就绪');
     } else {
-      logger('⚠ [会话标题] 未定位到 workbench yhn(t) 锚点（外围增强跳过，不影响主窗口运行）');
+      logger('⚠ [会话标题] 未定位到 workbench 标题枢纽锚点（外围增强跳过，不影响主窗口运行）');
     }
   }
 
-  // 8. 会话标题与思考标签注入：jetskiAgent/main.js
+  // 8. 抗混淆注入 jetskiAgent/main.js
   if (fs.existsSync(jkPath)) {
     const jkSrcPath = fs.existsSync(jkPath + '.bak') ? jkPath + '.bak' : jkPath;
-    let jkCode = fs.readFileSync(jkSrcPath, 'utf8');
-    let jkChanged = false;
-
-    if (jkCode.includes(JETSKI_EST_TARGET)) {
-      jkCode = jkCode.replace(JETSKI_EST_TARGET, buildZhTitleEngine('est'));
-      jkChanged = true;
-      logger('✔ [会话标题] 已成功注入 jetskiAgent 标题输出枢纽 est(e)');
-    }
-    if (jkCode.includes(JETSKI_UEN_TARGET)) {
-      jkCode = jkCode.replace(JETSKI_UEN_TARGET, JETSKI_UEN_REPLACEMENT);
-      jkChanged = true;
-      logger('✔ [会话标题] 已拦截 uEn 列表渲染函数');
-    }
-    if (jkCode.includes(JETSKI_SMA_TARGET)) {
-      jkCode = jkCode.replace(JETSKI_SMA_TARGET, JETSKI_SMA_REPLACEMENT);
-      jkChanged = true;
-      logger('✔ [会话标题] 已拦截 sMa 搜索项渲染函数');
-    }
-
-    let jkThoughtHits = 0;
-    for (const [fromStr, toStr] of JETSKI_THOUGHT_PAIRS) {
-      if (jkCode.includes(fromStr)) {
-        jkCode = jkCode.split(fromStr).join(toStr);
-        jkThoughtHits++;
-        jkChanged = true;
-      }
-    }
-    if (jkThoughtHits > 0) {
-      logger(`✔ [思维链标签] 已汉化 jetskiAgent 思考标签 (${jkThoughtHits}/${JETSKI_THOUGHT_PAIRS.length} 处)`);
-    }
-    if (jkChanged) {
-      fs.writeFileSync(jkPath, jkCode, 'utf8');
-    } else if (isJetskiPatched(jkCode)) {
+    const jkCode = fs.readFileSync(jkSrcPath, 'utf8');
+    const jkRes = patchJetskiContent(jkCode);
+    if (jkRes.ok && jkRes.changed) {
+      fs.writeFileSync(jkPath, jkRes.code, 'utf8');
+      if (jkRes.fnName) logger(`✔ [会话标题] 已成功注入 jetskiAgent 标题输出枢纽 ${jkRes.fnName}(e)`);
+      if (jkRes.uenHit) logger('✔ [会话标题] 已拦截 jetskiAgent 列表渲染入口');
+      if (jkRes.smaHit) logger('✔ [会话标题] 已拦截 jetskiAgent 搜索项渲染入口');
+      if (jkRes.thoughtHits > 0) logger(`✔ [思维链标签] 已汉化 jetskiAgent 思考标签 (${jkRes.thoughtHits} 处)`);
+    } else if (jkRes.ok) {
       logger('✔ [jetskiAgent] 标题与思考标签注入已就绪');
     } else {
       logger('⚠ [jetskiAgent] 未定位到外围注入锚点（跳过，不影响主窗口运行）');
@@ -583,47 +1116,67 @@ function applyAllPatches(options = {}) {
   // 10. 安全清理 V8 字节码缓存
   safelyClearV8Cache(cachedDataDir, logger);
 
-  // 11. 写入包含版本与源哈希指纹的本机部署元数据
-  const { appVersion, distro } = readInstalledAppIdentity(appDir);
+  // 11. 写入包含 4 维版本身份、源哈希与真实 Node 路径的本机部署元数据
+  const identity = readInstalledAppIdentity(appDir);
   const hubSourcePath = resolveHubSourcePath(agyExtDir, patchDir);
+  const existingMeta = readDeployMeta(agyExtDir) || {};
+  const nodeExecPath = /node(\.exe)?$/i.test(path.basename(process.execPath)) ? process.execPath : (existingMeta.nodeExecPath || '');
 
   writeDeployMeta(agyExtDir, path.join(patchDir, 'src'), {
-    appVersion,
-    distro,
+    appVersion: identity.appVersion,
+    distro: identity.distro,
+    ideVersion: identity.ideVersion,
+    agyVersion: identity.agyVersion,
     hubSourceSha256: computeFileSha256(hubSourcePath),
     buildEngineSha256: computeFileSha256(ultimateBuildScript),
+    nodeExecPath,
+    moduleStatus: buildReport ? buildReport.modules : undefined,
+    skippedModules: buildReport ? buildReport.skippedModules : [],
     syncedChecksums
   });
 
   return {
-    appVersion,
-    distro,
+    ...identity,
+    buildReport,
     syncedChecksums
   };
 }
 
 module.exports = {
   PROXY_REQUIRED_ENDPOINTS,
+  PROXY_RESILIENCE_MARKERS,
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
   HUB_ZH_TABLE_FEATURE_MARKERS,
   EXTENSION_HOOK_MARKER,
-  EXTENSION_HOOK_TARGET,
-  WORKBENCH_YHN_TARGET,
+  EXTENSION_HOOK_REGEX,
+  WORKBENCH_TITLE_FN_REGEX,
   WORKBENCH_PATCHED_MARKER,
-  JETSKI_EST_TARGET,
-  JETSKI_UEN_TARGET,
-  JETSKI_SMA_TARGET,
-  JETSKI_THOUGHT_PAIRS,
-  JETSKI_PATCHED_MARKERS,
+  JETSKI_TITLE_FN_REGEX,
+  JETSKI_UEN_REGEX,
+  JETSKI_SMA_REGEX,
+  JETSKI_THINKING_FOR_REGEX,
+  JETSKI_THOUGHT_FOR_REGEX,
+  JETSKI_THINKING_DOTS_TARGET,
+  locateExtensionWebviewHook,
+  injectExtensionWebviewHook,
+  findByAnchorRegex,
+  replaceAllByAnchorRegex,
+  findMatchingBraceEnd,
+  locateTitleRpcModule,
+  locateThoughtModule,
+  locateTableModule,
   isAgyPackageLocalized,
   isWorkbenchPatched,
   isJetskiPatched,
   filesAreIdentical,
   resolveHubSourcePath,
   readInstalledAppIdentity,
+  formatAppIdentity,
   ensureFreshBackup,
   buildZhTitleEngine,
+  patchWorkbenchContent,
+  patchJetskiContent,
   applyAllPatches
 };

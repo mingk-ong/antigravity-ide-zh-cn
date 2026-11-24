@@ -445,31 +445,76 @@ async function runTests() {
     });
 
     // ---------------------------------------------------------------------
-    // 第五组：更新适配探针、熔断防白屏与跨版本安全 .bak 防污染验证
+    // 第五组：分层抗混淆探针、降级韧性、VBS 弹窗修复与跨版本安全备份验证
     // ---------------------------------------------------------------------
-    console.log('\n【第五组】更新适配探针、熔断保护与跨版本安全备份验证');
+    console.log('\n【第五组】分层抗混淆探针、降级韧性、VBS 弹窗修复与跨版本安全备份验证');
 
-    await test('更新适配探针 23 项必选核心锚点与外围增强锚点全量命中 + 内部耦合符号改名熔断校验', async () => {
+    await test('抗混淆 extension.js 定位器免疫内部 helper 改名 (Jv/Zw/自定义变量) 与多行 VBS 弹窗语法校验', async () => {
+      const { locateExtensionWebviewHook, injectExtensionWebviewHook } = require(path.join(SRC_DIR, 'core_injector.js'));
+      const { buildVbsNotificationScript } = require(path.join(SRC_DIR, 'auto_updater.js'));
+
+      // 1. 验证旧版 Jv(a)、新版 Zw(a) 及任意变量名改写均可 100% 抗混淆命中并动态捕获 URL 参数
+      const samples = [
+        { code: 'foo}renderWebviewHtml(a,b,c,d){Jv(a);var g=a.asWebviewUri(n.Uri.joinPath(this.context.extensionUri,"bridge.js"))', urlArg: 'c' },
+        { code: 'foo}renderWebviewHtml(a,b,c,d){Zw(a);var g=a.asWebviewUri(n.Uri.joinPath(this.context.extensionUri,"bridge.js"))', urlArg: 'c' },
+        { code: 'foo}renderWebviewHtml(e,t,urlParam,r){X9(e);var g=e.asWebviewUri(n.Uri.joinPath(this.context.extensionUri,"bridge.js"))', urlArg: 'urlParam' }
+      ];
+      for (const s of samples) {
+        const loc = locateExtensionWebviewHook(s.code);
+        assert.strictEqual(loc.matched, true, `抗混淆定位器应命中: ${s.code.slice(0, 40)}`);
+        assert.strictEqual(loc.urlArg, s.urlArg);
+        const inj = injectExtensionWebviewHook(s.code);
+        assert.strictEqual(inj.ok, true);
+        assert.strictEqual(inj.changed, true);
+        assert.ok(inj.code.includes(`${s.urlArg}=require("../hub_proxy.js").redirectIframeUrl(${s.urlArg})`), '应按动态捕获参数名注入');
+        // 幂等校验：二次调用不再重复注入
+        const inj2 = injectExtensionWebviewHook(inj.code);
+        assert.strictEqual(inj2.ok, true);
+        assert.strictEqual(inj2.changed, false);
+      }
+
+      // 2. 验证多行 VBS 弹窗脚本严格单行无物理换行（彻底修复 800A0409）
+      const vbs = buildVbsNotificationScript(
+        'Antigravity "测试" 标题',
+        '第一行提示 (v2.8.0)。\n第二行含"双引号"\n\n日志路径：C:\\Users\\demo\\a.log'
+      );
+      assert.ok(!/[\r\n]/.test(vbs), `VBS 脚本严禁包含物理换行符导致 800A0409: ${vbs}`);
+      assert.ok(vbs.includes(' & vbCrLf & '), '多行文案必须使用 vbCrLf 拼接');
+      assert.ok(vbs.includes('""双引号""'), '双引号必须双写转义');
+    });
+
+    await test('分层抗混淆兼容探针：核心全命中 + 局部增强模块变动自动降级（不拖垮整体）+ 核心破坏立即熔断', async () => {
       const { probeVersionCompatibility } = require(path.join(SRC_DIR, 'auto_updater.js'));
       const { resolveHubSourcePath } = require(path.join(SRC_DIR, 'core_injector.js'));
       const hubSourcePath = resolveHubSourcePath(agyExtDir, PATCH_DIR);
-      const probeOk = probeVersionCompatibility(hubSourcePath);
-      assert.strictEqual(probeOk.compatible, true, `当前官方版本应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
-      assert.strictEqual(probeOk.matchedAnchors.length, 23, `应命中全部 23 项必选核心锚点，实际=${probeOk.matchedAnchors.length}`);
-      assert.ok(probeOk.optionalAnchors.length >= 3 && probeOk.optionalAnchors.every(a => a.matched), '外围 workbench/jetskiAgent 锚点应全部兼容');
 
-      // 模拟新版 Google 更改了 iAc 内部耦合混淆名 n2 -> z9，必须触发安全熔断拒绝注入
+      // 1. 当前环境（含升级后的 1.12.0 extension.js Zw(a)）应 100% 满血兼容
+      const probeOk = probeVersionCompatibility(hubSourcePath);
+      assert.strictEqual(probeOk.compatible, true, `当前版本核心层应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
+      assert.strictEqual(probeOk.fullyCompatible, true, `当前版本全部增强模块应 100% 兼容: ${JSON.stringify(probeOk.featureModules)}`);
+      assert.ok(probeOk.matchedAnchors.length >= 6, `应命中核心层全部 6 项抗混淆锚点，实际=${probeOk.matchedAnchors.length}`);
+      assert.ok(probeOk.featureModules.length === 4 && probeOk.featureModules.every(m => m.matched), '4 大独立增强模块应全部兼容');
+      assert.ok(probeOk.optionalAnchors.length >= 3 && probeOk.optionalAnchors.every(a => a.matched), '外围 workbench/jetskiAgent 抗混淆锚点应全部兼容');
+
+      // 2. 模拟新版破坏思维链内部关键参数签名（去掉 thinking-collapsible-trigger）：
+      //    核心层仍应保持 compatible=true（可自动同步核心汉化），仅 thoughtStream 标记降级跳过 (fullyCompatible=false)
       const mutatedHub = path.join(tmpCacheDir, 'mutated_hub_main.js');
       const rawHub = fs.readFileSync(hubSourcePath, 'utf8');
-      const mutated = rawHub.replace('return D.createElement(n2,{trigger:q=>D.createElement(uY', 'return D.createElement(z9,{trigger:q=>D.createElement(uY');
+      const mutated = rawHub.replace('dataTestId:"thinking-collapsible-trigger"', 'dataTestId:"thinking-trigger-v99"');
       assert.notStrictEqual(mutated, rawHub, '模拟变异测试必须实际修改到目标片段');
       fs.writeFileSync(mutatedHub, mutated, 'utf8');
-      const probeBroken = probeVersionCompatibility(mutatedHub);
-      assert.strictEqual(probeBroken.compatible, false, '当 iAc 内部耦合符号变化时探针必须触发熔断');
-      assert.ok(
-        probeBroken.missingAnchors.some(a => a.id === 'iAc_coupled_symbols'),
-        '熔断报告必须精准定位到 iAc_coupled_symbols'
-      );
+      const probeDegraded = probeVersionCompatibility(mutatedHub);
+      assert.strictEqual(probeDegraded.compatible, true, '单个增强模块变动不应阻断核心汉化同步');
+      assert.strictEqual(probeDegraded.fullyCompatible, false, '应准确标记为部分降级态');
+      const thoughtMod = probeDegraded.featureModules.find(m => m.id === 'thoughtStream');
+      assert.ok(thoughtMod && thoughtMod.matched === false, 'thoughtStream 模块应被精准识别为不兼容待降级跳过');
+
+      // 3. 模拟核心入口 extension.js 被彻底破坏，必须坚决触发安全熔断 (compatible=false)
+      const brokenExt = path.join(tmpCacheDir, 'broken_extension.js');
+      fs.writeFileSync(brokenExt, 'function totallyDifferentExtension(){}', 'utf8');
+      const probeBrokenCore = probeVersionCompatibility(hubSourcePath, { extJsPath: brokenExt });
+      assert.strictEqual(probeBrokenCore.compatible, false, '核心入口 extension.js 缺失必须坚决熔断防白屏');
+      assert.ok(probeBrokenCore.missingAnchors.some(a => a.id === 'ext_renderWebviewHtml'));
     });
 
     await test('跨版本安全备份 ensureFreshBackup：官方新版覆盖后自动刷新 .bak，绝不用旧 .bak 污染新版', async () => {

@@ -24,10 +24,12 @@ const LOG_FILE = getLogFile('antigravity_auto_patch.log');
 // 补丁自身产出的文件一律忽略，不作为官方更新事件触发
 const SELF_ARTIFACT_PATTERNS = [
   'hub_main_zh.js',
+  'hub_main.js',
   'hub_proxy.js',
   'title_translator.js',
   'thought_translator.js',
   '.agy_zh_meta.json',
+  '.agy_build_report.json',
   'hub_debug.log',
   '.bak'
 ];

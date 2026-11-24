@@ -8,6 +8,7 @@ const {
 } = require('./config');
 const {
   PROXY_REQUIRED_ENDPOINTS,
+  PROXY_RESILIENCE_MARKERS,
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
@@ -18,7 +19,8 @@ const {
   isJetskiPatched,
   filesAreIdentical,
   resolveHubSourcePath,
-  readInstalledAppIdentity
+  readInstalledAppIdentity,
+  formatAppIdentity
 } = require('./core_injector');
 
 function runVerify() {
@@ -43,7 +45,6 @@ function runVerify() {
   const titleTranslatorPath = path.join(agyExtDir, 'title_translator.js');
   const thoughtTranslatorPath = path.join(agyExtDir, 'thought_translator.js');
   const zhMainPath = path.join(agyExtDir, 'hub_main_zh.js');
-  const liveHubMainPath = path.join(agyExtDir, 'hub_main.js');
 
   const srcProxyPath = path.join(patchDir, 'src', 'hub_proxy.template.js');
   const srcTitleTranslatorPath = path.join(patchDir, 'src', 'title_translator.js');
@@ -62,6 +63,9 @@ function runVerify() {
       console.error(`❌ [未通过] ${name}${extra ? ' ' + extra : ''}`);
     }
   }
+
+  const curId = readInstalledAppIdentity(appDir);
+  console.log(`当前检测客户端: Antigravity ${formatAppIdentity(curId)}\n`);
 
   // 1. 检验 product.json 完整性校验和（全量 + 关键内核）
   assert('IDE 安装目录与 product.json 存在', fs.existsSync(installDir) && fs.existsSync(productJsonPath));
@@ -93,22 +97,25 @@ function runVerify() {
   assert('扩展 extension.js 文件存在', fs.existsSync(extJsPath));
   if (fs.existsSync(extJsPath)) {
     const extContent = fs.readFileSync(extJsPath, 'utf8');
-    assert('extension.js 包含 Webview 代理重定向钩子', extContent.includes(EXTENSION_HOOK_MARKER));
+    assert('extension.js 包含抗混淆 Webview 代理重定向钩子', extContent.includes(EXTENSION_HOOK_MARKER) && extContent.includes('hub_proxy'));
   }
   assert(
     '扩展 agy/package.json 命令标题汉化生效',
     fs.existsSync(agyExtPackagePath) && isAgyPackageLocalized(fs.readFileSync(agyExtPackagePath, 'utf8'))
   );
 
-  // 3. 检验代理与双翻译微服务（存在性 + 完整路由/特性 + 与源码模板一致）
+  // 3. 检验代理与双翻译微服务（存在性 + 完整路由/热捕获特性 + 与源码模板一致）
   assert('Hub 透明代理模块 hub_proxy.js 存在且与源码模板同步', fs.existsSync(proxyPath) && filesAreIdentical(srcProxyPath, proxyPath));
   if (fs.existsSync(proxyPath)) {
     const proxyContent = fs.readFileSync(proxyPath, 'utf8');
     const missingEndpoints = PROXY_REQUIRED_ENDPOINTS.filter(ep => !proxyContent.includes(ep));
+    const missingResilience = PROXY_RESILIENCE_MARKERS.filter(m => !proxyContent.includes(m));
     assert(
-      'hub_proxy.js 包含全部 5 个标题与思维链微服务端点',
-      missingEndpoints.length === 0,
-      missingEndpoints.length === 0 ? `(${PROXY_REQUIRED_ENDPOINTS.length}/${PROXY_REQUIRED_ENDPOINTS.length})` : `(缺失: ${missingEndpoints.join(', ')})`
+      'hub_proxy.js 包含全部 5 个微服务端点及升级热捕获/日志留存能力',
+      missingEndpoints.length === 0 && missingResilience.length === 0,
+      missingEndpoints.length === 0 && missingResilience.length === 0
+        ? `(端点 ${PROXY_REQUIRED_ENDPOINTS.length}/${PROXY_REQUIRED_ENDPOINTS.length}, 韧性 ${PROXY_RESILIENCE_MARKERS.length}/${PROXY_RESILIENCE_MARKERS.length})`
+        : `(缺失: ${[...missingEndpoints, ...missingResilience].join(', ')})`
     );
   }
 
@@ -130,31 +137,41 @@ function runVerify() {
     );
   }
 
-  // 4. 检验部署元数据与版本漂移状态
+  // 4. 检验部署元数据与 4 维版本零漂移状态
   const meta = readDeployMeta(agyExtDir);
   const hubSourcePath = resolveHubSourcePath(agyExtDir, patchDir);
   const hubSourceSha = computeFileSha256(hubSourcePath);
   const buildEngineSha = computeFileSha256(buildEnginePath);
-  const { appVersion: curAppVersion, distro: curDistro } = readInstalledAppIdentity(appDir);
   assert(
-    '部署元数据 .agy_zh_meta.json 完整就绪（含日志、缓存路径与版本基准指纹）',
-    Boolean(meta && meta.patchSrcDir && meta.logDir && meta.cacheDir && meta.hubSourceSha256 && meta.buildEngineSha256)
-  );
-  assert(
-    '已部署资产与当前客户端版本、hub_main.js 源及构建引擎零版本漂移',
+    '部署元数据 .agy_zh_meta.json 完整就绪（含日志、缓存、Node 路径与 4 维版本指纹）',
     Boolean(
       meta &&
-        (!curAppVersion || meta.appVersion === curAppVersion) &&
-        (!curDistro || meta.distro === curDistro) &&
+        meta.patchSrcDir &&
+        meta.logDir &&
+        meta.cacheDir &&
+        meta.hubSourceSha256 &&
+        meta.buildEngineSha256 &&
+        meta.nodeExecPath
+    )
+  );
+  assert(
+    '已部署资产与当前 4 维客户端版本、hub_main.js 源及构建引擎零漂移',
+    Boolean(
+      meta &&
+        (!curId.appVersion || meta.appVersion === curId.appVersion) &&
+        (!curId.distro || meta.distro === curId.distro) &&
+        (!curId.ideVersion || meta.ideVersion === curId.ideVersion) &&
+        (!curId.agyVersion || meta.agyVersion === curId.agyVersion) &&
         (!hubSourceSha || meta.hubSourceSha256 === hubSourceSha) &&
         (!buildEngineSha || meta.buildEngineSha256 === buildEngineSha)
     )
   );
 
-  // 5. 检验 hub_main_zh.js 汉化、标题持久化与思维链全部新功能
+  // 5. 检验 hub_main_zh.js 汉化、标题持久化、思维链与表格自适应全部功能
   assert('汉化版前端资产 hub_main_zh.js 存在', fs.existsSync(zhMainPath));
   if (fs.existsSync(zhMainPath)) {
     const zhContent = fs.readFileSync(zhMainPath, 'utf8');
+    const modStat = (meta && meta.moduleStatus) || null;
     const testKeywords = [
       '权限预设模板',
       '全局权限',
@@ -177,31 +194,44 @@ function runVerify() {
     }
     assert('Hub 前端核心关键字汉化覆盖率', matchedKeywords === testKeywords.length, `(${matchedKeywords}/${testKeywords.length})`);
 
+    // 严格按真实生效状态审查：任何增强模块降级/缺失均如实报 ❌，绝不伪装 100% 通过
     const missingTitleMarkers = HUB_ZH_TITLE_FEATURE_MARKERS.filter(m => !zhContent.includes(m));
     assert(
       'Hub 前端会话标题拦截与原生 RPC 持久化守卫就绪',
       missingTitleMarkers.length === 0,
-      missingTitleMarkers.length === 0 ? `(${HUB_ZH_TITLE_FEATURE_MARKERS.length}/${HUB_ZH_TITLE_FEATURE_MARKERS.length})` : `(缺失: ${missingTitleMarkers.join(', ')})`
+      missingTitleMarkers.length === 0
+        ? `(${HUB_ZH_TITLE_FEATURE_MARKERS.length}/${HUB_ZH_TITLE_FEATURE_MARKERS.length})`
+        : `(未生效/已降级，缺失: ${missingTitleMarkers.join(', ')})`
     );
 
     const missingThoughtMarkers = HUB_ZH_THOUGHT_FEATURE_MARKERS.filter(m => !zhContent.includes(m));
     assert(
       'Hub 前端思维链实时流式翻译、直出门控、防打断悬停与小锁锁定就绪',
       missingThoughtMarkers.length === 0,
-      missingThoughtMarkers.length === 0 ? `(${HUB_ZH_THOUGHT_FEATURE_MARKERS.length}/${HUB_ZH_THOUGHT_FEATURE_MARKERS.length})` : `(缺失: ${missingThoughtMarkers.join(', ')})`
+      missingThoughtMarkers.length === 0
+        ? `(${HUB_ZH_THOUGHT_FEATURE_MARKERS.length}/${HUB_ZH_THOUGHT_FEATURE_MARKERS.length})`
+        : `(未生效/已降级，缺失: ${missingThoughtMarkers.join(', ')})`
     );
 
     const missingTableMarkers = HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !zhContent.includes(m));
     assert(
       'Hub 前端 Markdown 表格智能权重自适应布局与菜单汉化就绪',
       missingTableMarkers.length === 0,
-      missingTableMarkers.length === 0 ? `(${HUB_ZH_TABLE_FEATURE_MARKERS.length}/${HUB_ZH_TABLE_FEATURE_MARKERS.length})` : `(缺失: ${missingTableMarkers.join(', ')})`
+      missingTableMarkers.length === 0
+        ? `(${HUB_ZH_TABLE_FEATURE_MARKERS.length}/${HUB_ZH_TABLE_FEATURE_MARKERS.length})`
+        : `(未生效/已降级，缺失: ${missingTableMarkers.join(', ')})`
+    );
+    const skippedList = Array.isArray(meta?.skippedModules) ? meta.skippedModules : [];
+    assert(
+      '无任何降级跳过的增强模块（全功能满血生效）',
+      skippedList.length === 0,
+      skippedList.length === 0 ? '(0 项降级)' : `(已降级跳过: ${skippedList.map(s => s.module).join('、')})`
     );
   }
 
   // 6. 检验外层工作台与 jetskiAgent 实际注入生效状态
   assert(
-    'workbench.desktop.main.js 会话标题输出枢纽 yhn(t) 注入生效',
+    'workbench.desktop.main.js 会话标题输出枢纽注入生效',
     fs.existsSync(wbPath) && isWorkbenchPatched(fs.readFileSync(wbPath, 'utf8'))
   );
   assert(

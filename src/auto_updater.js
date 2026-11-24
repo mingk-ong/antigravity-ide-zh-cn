@@ -2,11 +2,14 @@
  * Antigravity IDE 智能自愈与更新自适应检测引擎 (Auto-Updater & Self-Healing Engine)
  *
  * 核心特性：
- * 1. 深度多维健康检查：覆盖 7 大维度（扩展钩子、代理与双翻译微服务模板一致性、hub_main_zh.js 完整特性指纹、
- *    官方 hub_main.js 与构建引擎哈希漂移、外层 workbench/jetskiAgent/package.json 注入态、元数据与 product.json 全量签名）
- * 2. 分层特征指纹兼容探针：23 项主引擎必选核心锚点（含 iAc/lkc/mkc 内部耦合符号组与 extension.js）+ 外围增强锚点分级评估
- * 3. 统一无损自愈流水线：直接复用 core_injector.applyAllPatches，与手动 patcher.js 100% 同步无漏项，内置跨版本 .bak 防污染保护
- * 4. 零破坏安全防御：遇到不兼容版本坚决熔断，保持官方原版启动并输出详尽诊断报告
+ * 1. 深度多维健康检查：覆盖 4 维版本身份（IDE v2.8.0 / agy v1.12.0 / VS Code / Distro）、扩展抗混淆钩子、
+ *    代理热捕获与双翻译微服务模板一致性、hub_main_zh.js 特性指纹、外层 workbench/jetskiAgent 注入态与 product.json 全量签名
+ * 2. 分层抗混淆兼容探针：
+ *    - 核心必选层（抗混淆 extension.js 入口 + 设置底座）：任一缺失坚决熔断保原版启动
+ *    - 独立增强层（会话标题枢纽/RPC、思维链 iAc、Markdown 表格 lkc/mkc、外层 workbench/jetskiAgent）：
+ *      单模块不兼容自动安全降级跳过，绝不因局部重构导致整体退回纯英文
+ * 3. 统一无损自愈流水线：复用 core_injector.applyAllPatches，内置跨版本 .bak 防污染保护
+ * 4. 合法多行中文 VBS 提醒弹窗：严格转义换行符为 vbCrLf，彻底杜绝 800A0409 语法报错
  * 5. 智能日志生命周期管理：仅保留最近 2 次完整运行记录，单次超 500KB 自动体积兜底裁剪
  * 6. 零黑框静默拉起 IDE 主程序，全透传命令行参数
  */
@@ -24,23 +27,31 @@ const {
 } = require('./config');
 const {
   PROXY_REQUIRED_ENDPOINTS,
+  PROXY_RESILIENCE_MARKERS,
   THOUGHT_TRANSLATOR_REQUIRED_MARKERS,
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
   HUB_ZH_TABLE_FEATURE_MARKERS,
   EXTENSION_HOOK_MARKER,
-  EXTENSION_HOOK_TARGET,
-  WORKBENCH_YHN_TARGET,
-  JETSKI_EST_TARGET,
-  JETSKI_UEN_TARGET,
-  JETSKI_SMA_TARGET,
-  JETSKI_THOUGHT_PAIRS,
+  WORKBENCH_TITLE_FN_REGEX,
+  JETSKI_TITLE_FN_REGEX,
+  JETSKI_UEN_REGEX,
+  JETSKI_SMA_REGEX,
+  JETSKI_THINKING_FOR_REGEX,
+  JETSKI_THOUGHT_FOR_REGEX,
+  JETSKI_THINKING_DOTS_TARGET,
+  locateExtensionWebviewHook,
+  findByAnchorRegex,
+  locateTitleRpcModule,
+  locateThoughtModule,
+  locateTableModule,
   isAgyPackageLocalized,
   isWorkbenchPatched,
   isJetskiPatched,
   filesAreIdentical,
   resolveHubSourcePath,
   readInstalledAppIdentity,
+  formatAppIdentity,
   applyAllPatches
 } = require('./core_injector');
 
@@ -58,7 +69,6 @@ const LOG_FILE = path.join(DEFAULT_LOG_DIR, 'antigravity_auto_patch.log');
 const IDE_EXE = path.join(APP_DIR, 'Antigravity IDE.exe');
 
 // 关键系统文件
-const PACKAGE_JSON = path.join(RESOURCES_APP, 'package.json');
 const OUT_DIR = path.join(RESOURCES_APP, 'out');
 const WORKBENCH_JS = path.join(OUT_DIR, 'vs', 'workbench', 'workbench.desktop.main.js');
 const JETSKI_JS = path.join(OUT_DIR, 'jetskiAgent', 'main.js');
@@ -68,7 +78,6 @@ const TRANSLATOR_JS = path.join(EXT_DIR, 'title_translator.js');
 const THOUGHT_TRANSLATOR_JS = path.join(EXT_DIR, 'thought_translator.js');
 const ZH_MAIN_JS = path.join(EXT_DIR, 'hub_main_zh.js');
 const LIVE_HUB_MAIN = path.join(EXT_DIR, 'hub_main.js');
-const SRC_HUB_MAIN = path.join(PATCH_DIR, 'hub_main.js');
 const BUILD_ENGINE_JS = path.join(PATCH_DIR, 'build_ultimate_chinese_engine.js');
 const SRC_PROXY_JS = path.join(PATCH_DIR, 'src', 'hub_proxy.template.js');
 const SRC_TRANSLATOR_JS = path.join(PATCH_DIR, 'src', 'title_translator.js');
@@ -81,9 +90,19 @@ function formatBytes(bytes) {
 }
 
 /**
+ * 构造严格合法的单行 VBScript MsgBox 脚本：
+ * - 将所有换行符 (\r\n / \n) 转换为 `" & vbCrLf & "`，彻底杜绝 VBScript 800A0409 未结束字符串常量报错
+ */
+function buildVbsNotificationScript(title, message) {
+  const escapeVbsSegment = (str) => String(str || '').replace(/"/g, '""');
+  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  const msgExpr = lines.map(line => `"${escapeVbsSegment(line)}"`).join(' & vbCrLf & ');
+  const safeTitle = escapeVbsSegment(String(title || '').replace(/\r?\n/g, ' '));
+  return `MsgBox ${msgExpr}, 48, "${safeTitle}"`;
+}
+
+/**
  * 日志按运行次数精准留存管理器（严格保留最近 2 次运行日志）
- * - 写入本次新日志前调用 keepExistingRuns = 1，写完本次后文件内恰好保留最近 2 次完整运行记录
- * - 若单次极端体积超过 maxBytes，额外执行尾部行保护
  */
 function pruneLogKeepLastRuns(logPath, keepExistingRuns = 1, maxBytes = 500 * 1024) {
   if (!fs.existsSync(logPath)) return { purgedRuns: 0, keptRuns: 0, trimmed: false };
@@ -190,12 +209,20 @@ function inspectHealthDeeply() {
     const thoughtContent = fs.readFileSync(THOUGHT_TRANSLATOR_JS, 'utf8');
     const hasFixedPort = proxyContent.includes('14588');
     const missingEndpoints = PROXY_REQUIRED_ENDPOINTS.filter(ep => !proxyContent.includes(ep));
+    const missingResilience = PROXY_RESILIENCE_MARKERS.filter(m => !proxyContent.includes(m));
     const missingThoughtMarkers = THOUGHT_TRANSLATOR_REQUIRED_MARKERS.filter(m => !thoughtContent.includes(m));
     const proxySynced = !fs.existsSync(SRC_PROXY_JS) || filesAreIdentical(SRC_PROXY_JS, PROXY_JS);
     const titleSynced = !fs.existsSync(SRC_TRANSLATOR_JS) || filesAreIdentical(SRC_TRANSLATOR_JS, TRANSLATOR_JS);
     const thoughtSynced = !fs.existsSync(SRC_THOUGHT_TRANSLATOR_JS) || filesAreIdentical(SRC_THOUGHT_TRANSLATOR_JS, THOUGHT_TRANSLATOR_JS);
 
-    const proxyAllOk = missingEndpoints.length === 0 && missingThoughtMarkers.length === 0 && proxySynced && titleSynced && thoughtSynced && metaOk;
+    const proxyAllOk =
+      missingEndpoints.length === 0 &&
+      missingResilience.length === 0 &&
+      missingThoughtMarkers.length === 0 &&
+      proxySynced &&
+      titleSynced &&
+      thoughtSynced &&
+      metaOk;
 
     report.details.proxy = {
       path: PROXY_JS,
@@ -203,7 +230,7 @@ function inspectHealthDeeply() {
       port: hasFixedPort ? '固定高位端口 14588 (消除时序竞争)' : '动态端口',
       translateEndpoint:
         missingEndpoints.length === 0
-          ? `已启用全部 ${PROXY_REQUIRED_ENDPOINTS.length} 项标题与思维链微服务端点`
+          ? `已启用全部 ${PROXY_REQUIRED_ENDPOINTS.length} 项微服务端点 + 升级热捕获`
           : `缺少端点: ${missingEndpoints.join(', ')}`,
       syncStatus: proxySynced && titleSynced && thoughtSynced ? '与源码 100% 同步' : '检测到源码已更新（待同步）',
       metaStatus: metaOk ? '元数据与纯本地缓存配置就绪' : '缺少 .agy_zh_meta.json',
@@ -213,6 +240,10 @@ function inspectHealthDeeply() {
     if (missingEndpoints.length > 0) {
       report.valid = false;
       report.failures.push(`hub_proxy.js 缺少必要微服务端点: ${missingEndpoints.join(', ')}`);
+    }
+    if (missingResilience.length > 0) {
+      report.valid = false;
+      report.failures.push(`hub_proxy.js 缺少升级热捕获特性: ${missingResilience.join(', ')}`);
     }
     if (missingThoughtMarkers.length > 0) {
       report.valid = false;
@@ -237,67 +268,84 @@ function inspectHealthDeeply() {
     report.details.proxy = { ok: false, error: missingDesc };
   }
 
-  // 3. 检查汉化核心 hub_main_zh.js（含最新直出中文门控、防打断悬停与小锁特性指纹）
+  // 3. 检查汉化核心 hub_main_zh.js 与 4 维版本漂移
   if (fs.existsSync(ZH_MAIN_JS)) {
     const stat = fs.statSync(ZH_MAIN_JS);
     const content = fs.readFileSync(ZH_MAIN_JS, 'utf8');
+    const modStat = (meta && meta.moduleStatus) || null;
 
     const hasSt = content.includes('_wrapMap(new Map');
     const hasUt = content.includes('_titles =') && content.includes('通用设置');
     const hasYt = content.includes('_secTitles =') && content.includes('自定义扩展与技能');
     const hasXt = content.includes('_labels =') && content.includes('权限预设模板');
     const hasDomCleaner = content.includes('Antigravity 全局自适应运行时 DOM 清洗引擎');
-    const hasTitleEngine = HUB_ZH_TITLE_FEATURE_MARKERS.every(m => content.includes(m));
-    const missingThoughtFeatures = HUB_ZH_THOUGHT_FEATURE_MARKERS.filter(m => !content.includes(m));
+
+    // 若某增强模块在新版本中已记录为“受控降级跳过”，则不因该模块缺失触发无限重编译循环
+    const titleExpected = !modStat || !modStat.titleRpc || modStat.titleRpc.enabled !== false;
+    const thoughtExpected = !modStat || !modStat.thoughtStream || modStat.thoughtStream.enabled !== false;
+    const tableExpected = !modStat || !modStat.tableLayout || modStat.tableLayout.enabled !== false;
+
+    const hasTitleEngine = !titleExpected || HUB_ZH_TITLE_FEATURE_MARKERS.every(m => content.includes(m));
+    const missingThoughtFeatures = thoughtExpected ? HUB_ZH_THOUGHT_FEATURE_MARKERS.filter(m => !content.includes(m)) : [];
     const hasThoughtEngine = missingThoughtFeatures.length === 0;
-    const missingTableFeatures = HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !content.includes(m));
+    const missingTableFeatures = tableExpected ? HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !content.includes(m)) : [];
     const hasTableEngine = missingTableFeatures.length === 0;
 
-    // 检查版本漂移：官方 IDE 版本/distro、hub_main.js 源或本地构建引擎是否已变更
+    // 4 维版本漂移检测（IDE 版本 + agy 扩展版本 + VS Code 基座 + Distro + 源资产/构建引擎哈希）
     const hubSourcePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
     const hubSourceSha = computeFileSha256(hubSourcePath);
     const buildEngineSha = computeFileSha256(BUILD_ENGINE_JS);
-    const { appVersion: curAppVersion, distro: curDistro } = readInstalledAppIdentity(RESOURCES_APP);
+    const curId = readInstalledAppIdentity(RESOURCES_APP);
     const appIdentityDrifted = Boolean(
       meta &&
-        ((curAppVersion && meta.appVersion && meta.appVersion !== curAppVersion) ||
-          (curDistro && meta.distro && meta.distro !== curDistro))
+        ((curId.appVersion && meta.appVersion && meta.appVersion !== curId.appVersion) ||
+          (curId.distro && meta.distro && meta.distro !== curId.distro) ||
+          (curId.ideVersion && meta.ideVersion && meta.ideVersion !== curId.ideVersion) ||
+          (curId.agyVersion && meta.agyVersion && meta.agyVersion !== curId.agyVersion))
     );
     const hubSourceDrifted = Boolean(hubSourceSha && meta && meta.hubSourceSha256 && meta.hubSourceSha256 !== hubSourceSha);
     const buildEngineDrifted = Boolean(buildEngineSha && meta && meta.buildEngineSha256 && meta.buildEngineSha256 !== buildEngineSha);
-    const hubMetaMissingHash = Boolean(!meta || !meta.hubSourceSha256 || !meta.buildEngineSha256 || (curDistro && !meta.distro));
+    const hubMetaMissingHash = Boolean(
+      !meta ||
+        !meta.hubSourceSha256 ||
+        !meta.buildEngineSha256 ||
+        (curId.distro && !meta.distro) ||
+        (curId.ideVersion && !meta.ideVersion) ||
+        (curId.agyVersion && !meta.agyVersion)
+    );
     const noDrift = !appIdentityDrifted && !hubSourceDrifted && !buildEngineDrifted && !hubMetaMissingHash;
+    const coreSettingsOk = [hasSt, hasUt, hasYt, hasXt].filter(Boolean).length >= 2 && hasDomCleaner;
 
-    const allEnginesOk = hasSt && hasUt && hasYt && hasXt && hasDomCleaner && hasTitleEngine && hasThoughtEngine && hasTableEngine && noDrift;
+    const allEnginesOk = coreSettingsOk && hasTitleEngine && hasThoughtEngine && hasTableEngine && noDrift;
 
     report.details.zhBundle = {
       path: ZH_MAIN_JS,
       size: formatBytes(stat.size),
       mtime: stat.mtime.toLocaleString('zh-CN', { hour12: false }),
       engines: {
-        sT_元数据工厂: hasSt ? '✔ 劫持正常' : '❌ 缺失',
-        uT_顶层标题卡片: hasUt ? '✔ 注入正常' : '❌ 缺失',
-        yT_分区折叠面板: hasYt ? '✔ 注入正常' : '❌ 缺失',
-        xT_设置卡片行: hasXt ? '✔ 注入正常' : '❌ 缺失',
-        XB_会话标题枢纽: hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
-        iAc_思维链流式翻译: hasThoughtEngine ? '✔ 直出门控/悬停防打断/小锁全就绪' : `❌ 缺失 (${missingThoughtFeatures.slice(0, 3).join(', ')})`,
-        lkc_表格自适应布局: hasTableEngine ? '✔ 智能权重列宽/防遮挡/菜单汉化就绪' : `❌ 缺失 (${missingTableFeatures.slice(0, 3).join(', ')})`,
+        sT_元数据工厂: hasSt ? '✔ 劫持正常' : '⚠ 跳过',
+        uT_顶层标题卡片: hasUt ? '✔ 注入正常' : '⚠ 跳过',
+        yT_分区折叠面板: hasYt ? '✔ 注入正常' : '⚠ 跳过',
+        xT_设置卡片行: hasXt ? '✔ 注入正常' : '⚠ 跳过',
+        XB_会话标题枢纽: !titleExpected ? '⚠ 已降级跳过' : hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
+        iAc_思维链流式翻译: !thoughtExpected ? '⚠ 已降级跳过' : hasThoughtEngine ? '✔ 直出门控/悬停防打断/小锁全就绪' : `❌ 缺失 (${missingThoughtFeatures.slice(0, 3).join(', ')})`,
+        lkc_表格自适应布局: !tableExpected ? '⚠ 已降级跳过' : hasTableEngine ? '✔ 智能权重列宽/防遮挡/菜单汉化就绪' : `❌ 缺失 (${missingTableFeatures.slice(0, 3).join(', ')})`,
         DOM_运行时清洗器: hasDomCleaner ? '✔ 挂载正常' : '❌ 缺失'
       },
       driftStatus: appIdentityDrifted
-        ? `检测到 IDE 版本变化 (${meta.appVersion}/${String(meta.distro || '').slice(0, 8)} -> ${curAppVersion}/${String(curDistro || '').slice(0, 8)})`
+        ? `检测到客户端升级 (${formatAppIdentity(meta)} -> ${formatAppIdentity(curId)})`
         : hubSourceDrifted
           ? 'hub_main.js 源码已更新（待重编）'
           : buildEngineDrifted
             ? '构建引擎源码已更新（待重编）'
             : hubMetaMissingHash
-              ? '版本基准哈希待建立'
+              ? '版本基准指纹待建立'
               : '与当前客户端版本、源资产及构建脚本零漂移',
       ok: allEnginesOk
     };
-    if (!hasSt || !hasUt || !hasYt || !hasXt || !hasDomCleaner || !hasTitleEngine) {
+    if (!coreSettingsOk || !hasTitleEngine) {
       report.valid = false;
-      report.failures.push('hub_main_zh.js 汉化引擎或会话标题守卫指纹不完整');
+      report.failures.push('hub_main_zh.js 汉化核心引擎或会话标题守卫指纹不完整');
     }
     if (!hasThoughtEngine) {
       report.valid = false;
@@ -309,7 +357,7 @@ function inspectHealthDeeply() {
     }
     if (appIdentityDrifted) {
       report.valid = false;
-      report.failures.push(`检测到 Antigravity IDE 版本或 Distro 变化 (${meta.appVersion} -> ${curAppVersion})，需重新验证并自愈注入`);
+      report.failures.push(`检测到 Antigravity IDE 版本升级 (${formatAppIdentity(meta)} -> ${formatAppIdentity(curId)})，需重新验证并同步汉化`);
     } else if (hubSourceDrifted) {
       report.valid = false;
       report.failures.push('检测到 hub_main.js 源资产发生变更（与已编译 hub_main_zh.js 基准哈希不一致，需自动重编）');
@@ -318,7 +366,7 @@ function inspectHealthDeeply() {
       report.failures.push('检测到本地 build_ultimate_chinese_engine.js 已更新（需重新编译部署 hub_main_zh.js）');
     } else if (hubMetaMissingHash) {
       report.valid = false;
-      report.failures.push('部署元数据缺少 hub_main.js/构建脚本/Distro 基准指纹（需自愈对齐一次）');
+      report.failures.push('部署元数据缺少 4 维版本身份或源资产基准指纹（需自愈对齐一次）');
     }
   } else {
     report.valid = false;
@@ -332,13 +380,13 @@ function inspectHealthDeeply() {
   const jkExists = fs.existsSync(JETSKI_JS);
   const jkOk = jkExists && isJetskiPatched(fs.readFileSync(JETSKI_JS, 'utf8'));
   report.details.outerBundles = {
-    workbench: wbExists ? (wbOk ? '✔ yhn 标题枢纽已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
-    jetskiAgent: jkExists ? (jkOk ? '✔ est 标题与思考标签已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
+    workbench: wbExists ? (wbOk ? '✔ 标题枢纽已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
+    jetskiAgent: jkExists ? (jkOk ? '✔ 标题与思考标签已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
     ok: wbOk && jkOk
   };
   if (wbExists && !wbOk) {
     report.valid = false;
-    report.failures.push('workbench.desktop.main.js 会话标题枢纽 yhn(t) 未注入或已被官方更新覆写');
+    report.failures.push('workbench.desktop.main.js 会话标题枢纽未注入或已被官方更新覆写');
   }
   if (jkExists && !jkOk) {
     report.valid = false;
@@ -355,7 +403,7 @@ function inspectHealthDeeply() {
       ok: true
     };
   } else {
-    report.details.liveBundle = { ok: false, error: '文件不存在' };
+    report.details.liveBundle = { ok: false, error: '文件不存在（将在首次启动后由代理自动热捕获核验）' };
   }
 
   // 6. 检查 product.json 完整性签名
@@ -419,9 +467,11 @@ function inspectHealthDeeply() {
 }
 
 /**
- * 阶段二：分层新版本特征指纹兼容性探针
- * - 必选核心锚点（23 项，含 hub_main.js 22 项 + extension.js 1 项）：任一缺失即坚决熔断保护，防止白屏
- * - 外围增强锚点（workbench / jetskiAgent）：分级记录诊断，不阻断主引擎自愈
+ * 阶段二：分层抗混淆新版本特征指纹兼容性探针
+ * - 核心必选层 (requiredCore)：extension.js 抗混淆代理钩子 + 设置中心基础层（>=2 项组件命中）
+ *   -> 任一核心缺失即坚决熔断保护，保留官方原版启动防止白屏
+ * - 独立增强层 (featureModules)：会话标题枢纽 / RPC 持久化 / 思维链流式翻译 / Markdown 表格自适应 / 外层工作台与智能体弹窗
+ *   -> 单个增强模块不兼容仅降级跳过该模块，不影响整体同步汉化
  */
 function probeVersionCompatibility(targetHubMainPath, opts = {}) {
   const extJsPath = opts.extJsPath || EXT_JS;
@@ -431,8 +481,10 @@ function probeVersionCompatibility(targetHubMainPath, opts = {}) {
   if (!fs.existsSync(targetHubMainPath)) {
     return {
       compatible: false,
+      fullyCompatible: false,
       matchedAnchors: [],
       missingAnchors: [{ id: 'hub_main', name: '官方静态源 hub_main.js', pattern: targetHubMainPath }],
+      featureModules: [],
       optionalAnchors: [],
       codeLength: 0,
       details: `在路径 ${targetHubMainPath} 未找到官方前端 bundle 文件。`
@@ -440,248 +492,174 @@ function probeVersionCompatibility(targetHubMainPath, opts = {}) {
   }
 
   const code = fs.readFileSync(targetHubMainPath, 'utf8');
-
-  const requiredHubAnchors = [
-    {
-      id: 'vT',
-      name: '侧边栏与路由映射函数 (vT)',
-      pattern: 'function vT(a){return CKb.get(a)??a}',
-      desc: '负责将 General、Browser、Models 等 20+ 个路由名称分发至侧边栏导航'
-    },
-    {
-      id: 'uT',
-      name: '顶层页面大标题与长篇说明组件 (uT)',
-      pattern: 'var zKb=D.createContext(!1),uT=({title:a,description:b',
-      desc: '负责 14 个设置屏幕及二级弹窗的顶层 Title 与 Description 展示'
-    },
-    {
-      id: 'yT',
-      name: '分区面板折叠小标题组件 (yT)',
-      pattern: 'var yT=({title:a,subtitle:b,headerRight:c',
-      desc: '负责 48 个分区（Token Usage、Skills、Rules、Browser Subagent 等）的分类展示'
-    },
-    {
-      id: 'xT',
-      name: '设置项卡片单行渲染器 (xT)',
-      pattern: 'var xT=({label:a,description:b,rightElement:c',
-      desc: '负责所有单项设置开关、说明文字与操作按钮的通用行渲染'
-    },
-    {
-      id: 'sT_head',
-      name: '配置元数据工厂函数头 (sT)',
-      pattern: 'function sT(a){',
-      desc: '设置中心的核心注册表工厂，提供全部动态配置项'
-    },
-    {
-      id: 'sT_map',
-      name: '配置注册表 Map 入口 (sT Map)',
-      pattern: 'return new Map([["useAICredits"',
-      desc: '配置字典的构造起点'
-    },
-    {
-      id: 'sT_end',
-      name: '配置注册表 Map 闭合特征 (sT End)',
-      pattern: 'settingType:"switch"}]])}var vKb=sT();',
-      desc: '工厂函数的执行返回与单例实例化锚点'
-    },
-    {
-      id: 'XB',
-      name: '会话标题核心渲染枢纽 (XB)',
-      pattern: 'function XB(a){var b=a?.annotations?.title?.trim()',
-      desc: '侧边栏与检索面板输出会话标题的最底层终极拦截点'
-    },
-    {
-      id: 'bypass_search',
-      name: '会话标题绕过点 1：搜索结果列表项',
-      pattern: 'label:a.title||"Untitled Conversation"',
-      desc: '封堵全局检索结果绕过 XB 的渲染入口'
-    },
-    {
-      id: 'bypass_active',
-      name: '会话标题绕过点 2：活跃会话索引 ($2a)',
-      pattern: 'a=a.annotations?.title||d||`Conversation ${f.slice(0,8)}`',
-      desc: '封堵活跃对话列表绕过 XB 的渲染入口'
-    },
-    {
-      id: 'bypass_parent',
-      name: '会话标题绕过点 3：父级追溯链路 (OYc)',
-      pattern: 'title:g?.annotations?.title?.trim()||g?.summary||"Parent Conversation"',
-      desc: '封堵子对话回溯父对话绕过 XB 的渲染入口'
-    },
-    {
-      id: 'bypass_scope',
-      name: '会话标题绕过点 4：上下文引用作用域条目',
-      pattern: 'g=d.annotations?.title?.trim()||g;',
-      desc: '封堵上下文引用标题绕过 XB 的渲染入口'
-    },
-    {
-      id: 'vcc',
-      name: 'Hub 对话注释与状态挂载组件 (vcc)',
-      pattern: 'var vcc=()=>{var a=SO(),b=Xk(),c=ZP(),d=xQ(),{updateConversationAnnotations:f}=PB(),g=tC(),h=wQ();',
-      desc: '负责挂载 Redux 状态订阅及官方原生 updateConversationAnnotations RPC 持久化守卫'
-    },
-    {
-      id: 'hAc',
-      name: '思维链计时头部动画文案 (hAc)',
-      pattern: 'd>=0?`Thinking for ${Math.max(1,d)}s`:"Thinking"',
-      desc: '负责汉化思考中实时计时器头部文案'
-    },
-    {
-      id: 'iAc_start',
-      name: '思维链渲染组件起点 (iAc)',
-      pattern: 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{',
-      desc: '负责渲染 Thought for 折叠面板及流式思维链实时翻译、防打断悬停与小锁交互'
-    },
-    {
-      id: 'ckc_table_measure',
-      name: 'Markdown 表格列宽测量函数 (ckc)',
-      pattern: 'function ckc(a){var b=a.querySelector(":scope > table");',
-      desc: '负责测量 Markdown 表格各列自然宽度与边框内边距'
-    },
-    {
-      id: 'lkc_table_start',
-      name: 'Markdown 表格主渲染组件起点 (lkc)',
-      pattern: 'function lkc({node:a,staggerStyle:b,...c}){',
-      desc: '负责 Markdown 表格自适应布局与窗口尺寸追踪'
-    },
-    {
-      id: 'mkc_table_menu',
-      name: 'Markdown 表格操作菜单组件 (mkc)',
-      pattern: 'function mkc({widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d}){',
-      desc: '负责表格右上角复制与展开全宽/适应窗口切换菜单'
-    }
-  ];
-
   const matchedAnchors = [];
   const missingAnchors = [];
 
-  for (const anchor of requiredHubAnchors) {
-    const idx = code.indexOf(anchor.pattern);
-    if (idx !== -1) {
-      matchedAnchors.push({ ...anchor, offset: idx });
-    } else {
-      missingAnchors.push(anchor);
-    }
-  }
-
-  // 必选锚点 16：iAc 结尾定界符 (;var jAc= 必须在 iAc 起点之后)
-  const iacStartAnchor = matchedAnchors.find(a => a.id === 'iAc_start');
-  const iacStartIdx = iacStartAnchor ? iacStartAnchor.offset : -1;
-  const iacEndIdx = iacStartIdx !== -1 ? code.indexOf(';var jAc=', iacStartIdx) : -1;
-  const iacEndAnchor = {
-    id: 'iAc_end',
-    name: '思维链渲染组件定界终点 (;var jAc=)',
-    pattern: ';var jAc='
-  };
-  if (iacEndIdx !== -1) {
-    matchedAnchors.push({ ...iacEndAnchor, offset: iacEndIdx });
-  } else {
-    missingAnchors.push(iacEndAnchor);
-  }
-
-  // 必选锚点 17：iAc 内部强耦合外部混淆符号组（防止新版换符号名导致注入后运行时报错白屏）
-  const iacCoupledSymbols = [
-    'tI()',
-    'd5b()',
-    'J.CascadeRunStatus.RUNNING',
-    'J.CortexStepStatus.RUNNING',
-    'J.CortexStepStatus.GENERATING',
-    'Fj()',
-    'pqc()',
-    'D.createElement(uY',
-    'D.createElement(n2',
-    'D.createElement(hAc'
-  ];
-  const iacBody = iacStartIdx !== -1 && iacEndIdx !== -1 ? code.slice(iacStartIdx, iacEndIdx + 1) : '';
-  const missingCoupled = iacBody ? iacCoupledSymbols.filter(sym => !iacBody.includes(sym)) : iacCoupledSymbols;
-  const coupledAnchor = {
-    id: 'iAc_coupled_symbols',
-    name: '思维链组件内部强耦合符号组 (tI/d5b/Fj/pqc/uY/n2/hAc)',
-    pattern: missingCoupled.length > 0 ? `缺失符号: ${missingCoupled.join(', ')}` : iacCoupledSymbols.join(', ')
-  };
-  if (missingCoupled.length === 0) {
-    matchedAnchors.push({ ...coupledAnchor, offset: iacStartIdx });
-  } else {
-    missingAnchors.push(coupledAnchor);
-  }
-
-  // 必选锚点 21：表格组件定界终点 (var nkc= 必须在 mkc 起点之后)
-  const mkcStartAnchor = matchedAnchors.find(a => a.id === 'mkc_table_menu');
-  const lkcStartAnchor = matchedAnchors.find(a => a.id === 'lkc_table_start');
-  const mkcStartIdx = mkcStartAnchor ? mkcStartAnchor.offset : -1;
-  const lkcStartIdx = lkcStartAnchor ? lkcStartAnchor.offset : -1;
-  const nkcEndIdx = mkcStartIdx !== -1 ? code.indexOf('var nkc=({src:a,alt:b,originalFilePath:c', mkcStartIdx) : -1;
-  const nkcEndAnchor = {
-    id: 'nkc_table_end',
-    name: 'Markdown 表格组件定界终点 (var nkc=)',
-    pattern: 'var nkc=({src:a,alt:b,originalFilePath:c'
-  };
-  if (nkcEndIdx !== -1) {
-    matchedAnchors.push({ ...nkcEndAnchor, offset: nkcEndIdx });
-  } else {
-    missingAnchors.push(nkcEndAnchor);
-  }
-
-  // 必选锚点 22：表格组件强耦合符号组 + 文件胶囊最小宽 CSS 锚点
-  const tableCoupledSymbols = [
-    'Wi(',
-    'ckc(',
-    'ekc(',
-    'fkc(',
-    'ikc(',
-    'kkc(',
-    'kY()',
-    'D.createElement(WW',
-    'D.createElement(XW',
-    'D.createElement(YW',
-    'D.createElement(ZW',
-    'D.createElement(gH',
-    'D.createElement(Aw'
-  ];
-  const tableBody = lkcStartIdx !== -1 && nkcEndIdx !== -1 ? code.slice(lkcStartIdx, nkcEndIdx) : '';
-  const missingTableCoupled = tableBody ? tableCoupledSymbols.filter(sym => !tableBody.includes(sym)) : tableCoupledSymbols;
-  const hasPillCss = code.includes('min-width: calc-size(max-content, min(size, 20ch));');
-  if (!hasPillCss) missingTableCoupled.push('.inline-pill-wrap(20ch)');
-  const tableCoupledAnchor = {
-    id: 'table_coupled_symbols',
-    name: 'Markdown 表格强耦合符号组与胶囊 CSS 锚点 (Wi/fkc/ikc/kkc/kY/WW-ZW/gH/Aw)',
-    pattern: missingTableCoupled.length > 0 ? `缺失符号: ${missingTableCoupled.join(', ')}` : tableCoupledSymbols.join(', ')
-  };
-  if (missingTableCoupled.length === 0) {
-    matchedAnchors.push({ ...tableCoupledAnchor, offset: lkcStartIdx });
-  } else {
-    missingAnchors.push(tableCoupledAnchor);
-  }
-
-  // 必选锚点 23：extension.js Webview 代理注入点（已挂钩或原生锚点命中）
+  // ----- A. 核心必选层 1：extension.js 抗混淆代理钩子 -----
   const extAnchor = {
     id: 'ext_renderWebviewHtml',
-    name: '扩展 Webview 渲染钩子入口 (extension.js)',
-    pattern: EXTENSION_HOOK_TARGET
+    name: '扩展 Webview 渲染钩子入口 (extension.js 抗混淆定位)'
   };
   if (fs.existsSync(extJsPath)) {
     const extCode = fs.readFileSync(extJsPath, 'utf8');
-    const hookIdx = extCode.indexOf(EXTENSION_HOOK_MARKER);
-    const rawIdx = extCode.indexOf(EXTENSION_HOOK_TARGET);
-    if (hookIdx !== -1 || rawIdx !== -1) {
-      matchedAnchors.push({ ...extAnchor, offset: hookIdx !== -1 ? hookIdx : rawIdx });
+    const loc = locateExtensionWebviewHook(extCode);
+    if (loc.matched) {
+      matchedAnchors.push({
+        ...extAnchor,
+        offset: loc.offset,
+        detail: loc.alreadyHooked ? '钩子已挂载' : `动态命中 URL 参数 ${loc.urlArg}`
+      });
     } else {
-      missingAnchors.push(extAnchor);
+      missingAnchors.push({
+        ...extAnchor,
+        pattern: 'renderWebviewHtml(a,b,c,d){ ... asWebviewUri(...,"bridge.js")'
+      });
     }
   } else {
     missingAnchors.push({ ...extAnchor, pattern: `文件不存在: ${extJsPath}` });
   }
 
-  // 外围增强锚点（可选分级评估：不阻断主引擎自愈，但透明展示在诊断报告中）
+  // ----- B. 核心必选层 2：设置底座 5 大抗混淆锚点（窄窗口毫秒级定位，至少命中 2 项即可） -----
+  const coreSettingRules = [
+    {
+      id: 'vT',
+      name: '侧边栏路由映射函数 (vT 抗混淆)',
+      anchor: '){return ',
+      back: 30,
+      fwd: 60,
+      regex: /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return ([A-Za-z_$][\w$]*)\.get\(\2\)\?\?\2\}/
+    },
+    {
+      id: 'uT',
+      name: '顶层页面大标题与说明组件 (uT 抗混淆)',
+      anchor: ',scrollable:',
+      back: 90,
+      fwd: 90,
+      regex: /([A-Za-z_$][\w$]*)=\(\{title:([A-Za-z_$][\w$]*),description:([A-Za-z_$][\w$]*),children:([A-Za-z_$][\w$]*),scrollable:([A-Za-z_$][\w$]*)=!0,headerRight:([A-Za-z_$][\w$]*),onBack:([A-Za-z_$][\w$]*)\}\)=>\{/
+    },
+    {
+      id: 'yT',
+      name: '分区折叠小标题组件 (yT 抗混淆)',
+      anchor: ',defaultCollapsed:',
+      back: 140,
+      fwd: 90,
+      regex: /([A-Za-z_$][\w$]*)=\(\{title:([A-Za-z_$][\w$]*),subtitle:([A-Za-z_$][\w$]*),headerRight:([A-Za-z_$][\w$]*),id:([A-Za-z_$][\w$]*),count:([A-Za-z_$][\w$]*),collapsible:([A-Za-z_$][\w$]*)=!1,defaultCollapsed:([A-Za-z_$][\w$]*)=!1,forceExpanded:([A-Za-z_$][\w$]*)=!1,children:([A-Za-z_$][\w$]*)\}\)=>\{/
+    },
+    {
+      id: 'xT',
+      name: '设置项卡片单行渲染器 (xT 抗混淆)',
+      anchor: ',unpadded:',
+      back: 180,
+      fwd: 120,
+      regex: /var ([A-Za-z_$][\w$]*)=\(\{label:([A-Za-z_$][\w$]*),description:([A-Za-z_$][\w$]*),rightElement:([A-Za-z_$][\w$]*),extraContent:([A-Za-z_$][\w$]*),badge:([A-Za-z_$][\w$]*),alignItems:([A-Za-z_$][\w$]*)=["']center["'],unpadded:([A-Za-z_$][\w$]*)=!1,labelId:([A-Za-z_$][\w$]*),descriptionId:([A-Za-z_$][\w$]*),disabled:([A-Za-z_$][\w$]*)=!1,"data-testid":([A-Za-z_$][\w$]*)\}\)=>/
+    },
+    {
+      id: 'sT',
+      name: '配置元数据工厂与 Map 闭环 (sT 抗混淆)',
+      anchor: 'return new Map([["useAICredits"',
+      back: 450,
+      fwd: 20,
+      regex: /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{(?:(?!;function )[\s\S]){0,420}?return new Map\(\[\["useAICredits"/
+    }
+  ];
+
+  const coreHits = [];
+  const coreMisses = [];
+  for (const rule of coreSettingRules) {
+    const m = findByAnchorRegex(code, rule.anchor, rule.regex, rule.back, rule.fwd);
+    if (m) {
+      if (rule.id === 'sT') {
+        const endRe = new RegExp(`settingType:"switch"\\}\\]\\]\\)\\}var ([A-Za-z_$][\\w$]*)=${m[1]}\\(\\);`);
+        if (!findByAnchorRegex(code.slice(m.index), 'settingType:"switch"}]])}', endRe, 10, 40)) {
+          coreMisses.push(rule);
+          continue;
+        }
+      }
+      coreHits.push({ id: rule.id, name: rule.name, offset: m.index, symbol: m[1] });
+      matchedAnchors.push({ id: rule.id, name: rule.name, offset: m.index, detail: `动态符号 ${m[1]}` });
+    } else {
+      coreMisses.push(rule);
+    }
+  }
+  if (coreHits.length < 2) {
+    for (const miss of coreMisses) {
+      missingAnchors.push({ id: miss.id, name: miss.name, pattern: String(miss.regex) });
+    }
+  }
+
+  // ----- C. 独立增强模块层（各自窄窗口判定，不兼容时安全降级跳过该模块） -----
+  const featureModules = [];
+
+  // 模块 1：会话标题枢纽 + 4 绕过点（抗混淆）
+  const xbMatch = findByAnchorRegex(
+    code,
+    '?.annotations?.coordinator?',
+    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{var ([A-Za-z_$][\w$]*)=\2\?\.annotations\?\.title\?\.trim\(\);return \2\?\.annotations\?\.coordinator\?\3\|\|"Coordinator":\3\|\|\2\?\.summary\?\.trim\(\)\|\|void 0\}/,
+    100,
+    120
+  );
+  const bypassPatterns = [
+    { anchor: '.title||"Untitled Conversation"', regex: /label:([A-Za-z_$][\w$]*)\.title\|\|"Untitled Conversation"/ },
+    { anchor: '||`Conversation ${', regex: /([A-Za-z_$][\w$]*)=\1\.annotations\?\.title\|\|([A-Za-z_$][\w$]*)\|\|`Conversation \$\{([A-Za-z_$][\w$]*)\.slice\(0,8\)\}`/ },
+    { anchor: '||"Parent Conversation"', regex: /title:([A-Za-z_$][\w$]*)\?\.annotations\?\.title\?\.trim\(\)\|\|\1\?\.summary\|\|"Parent Conversation"/ },
+    { anchor: '.annotations?.title?.trim()||', regex: /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.annotations\?\.title\?\.trim\(\)\|\|\1;/ }
+  ];
+  const bypassHitCount = bypassPatterns.filter(p => Boolean(findByAnchorRegex(code, p.anchor, p.regex, 80, 60))).length;
+  featureModules.push({
+    id: 'titleHub',
+    name: '会话标题显示枢纽与 4 绕过点 (抗混淆)',
+    matched: Boolean(xbMatch && bypassHitCount === 4),
+    detail: xbMatch ? `符号 ${xbMatch[1]}，绕过点 ${bypassHitCount}/4` : '未匹配到标题枢纽函数'
+  });
+
+  // 模块 2：会话标题 RPC 自动持久化守卫（全抗混淆动态定位，兼容 vcc / sjc 等）
+  const rpcLoc = locateTitleRpcModule(code);
+  featureModules.push({
+    id: 'titleRpc',
+    name: '会话标题原生 RPC 自动持久化守卫 (抗混淆)',
+    matched: rpcLoc.matched,
+    detail: rpcLoc.matched
+      ? `组件 ${rpcLoc.compName} (React=${rpcLoc.reactVar}, action=${rpcLoc.patchActionFn}, pb=${rpcLoc.createFn}/${rpcLoc.pbMod})`
+      : `${rpcLoc.reason}（将自动降级跳过）`
+  });
+
+  // 模块 3：思维链实时流式翻译与悬停小锁（全抗混淆动态定位，兼容 iAc / rTc 等）
+  const hacOk = Boolean(
+    findByAnchorRegex(code, '>=0?`Thinking for ${Math.max(1,', /([A-Za-z_$][\w$]*)>=0\?`Thinking for \$\{Math\.max\(1,\1\)\}s`:"Thinking"/, 24, 60)
+  );
+  const thoughtLoc = locateThoughtModule(code);
+  featureModules.push({
+    id: 'thoughtStream',
+    name: '思维链实时流式翻译、直出门控与悬停小锁 (抗混淆)',
+    matched: hacOk && thoughtLoc.matched,
+    detail:
+      hacOk && thoughtLoc.matched
+        ? `组件 ${thoughtLoc.compName} (React=${thoughtLoc.reactVar}, collapse=${thoughtLoc.collapseComp}, header=${thoughtLoc.headerComp})`
+        : [!hacOk ? '缺失 hAc 计时文案' : '', thoughtLoc.reason || ''].filter(Boolean).join('; ')
+  });
+
+  // 模块 4：Markdown 表格智能自适应与菜单汉化（全抗混淆动态定位，兼容 ckc-mkc / Crc-Mrc 等）
+  const tableLoc = locateTableModule(code);
+  featureModules.push({
+    id: 'tableLayout',
+    name: 'Markdown 表格智能权重自适应与菜单汉化 (抗混淆)',
+    matched: tableLoc.matched,
+    detail: tableLoc.matched
+      ? `组件 ${tableLoc.measureFn}/${tableLoc.tableComp}/${tableLoc.menuComp} (React=${tableLoc.reactVar}, menu=${tableLoc.menuRoot}, icon=${tableLoc.iconComp})`
+      : tableLoc.reason
+  });
+
+  // ----- D. 外围增强锚点（workbench / jetskiAgent 窄窗口抗混淆探测） -----
   const optionalAnchors = [];
   if (fs.existsSync(wbPath)) {
-    const wbSrc = fs.existsSync(wbPath + '.bak') && isWorkbenchPatched(fs.readFileSync(wbPath, 'utf8'))
+    const wbLive = fs.readFileSync(wbPath, 'utf8');
+    const wbSrc = fs.existsSync(wbPath + '.bak') && isWorkbenchPatched(wbLive)
       ? fs.readFileSync(wbPath + '.bak', 'utf8')
-      : fs.readFileSync(wbPath, 'utf8');
-    const wbReady = wbSrc.includes(WORKBENCH_YHN_TARGET) || isWorkbenchPatched(wbSrc);
+      : wbLive;
+    const wbReady = Boolean(findByAnchorRegex(wbSrc, '?.annotations?.title?.trim()', WORKBENCH_TITLE_FN_REGEX, 60, 120)) || isWorkbenchPatched(wbLive);
     optionalAnchors.push({
-      id: 'workbench_yhn',
-      name: '外层工作台标题枢纽 (workbench yhn)',
+      id: 'workbench_title',
+      name: '外层工作台标题枢纽 (workbench 抗混淆)',
       matched: wbReady
     });
   }
@@ -691,33 +669,47 @@ function probeVersionCompatibility(targetHubMainPath, opts = {}) {
       ? fs.readFileSync(jkPath + '.bak', 'utf8')
       : jkLive;
     const jkTitleReady =
-      (jkSrc.includes(JETSKI_EST_TARGET) && jkSrc.includes(JETSKI_UEN_TARGET) && jkSrc.includes(JETSKI_SMA_TARGET)) ||
+      (Boolean(findByAnchorRegex(jkSrc, '?.annotations?.title?.trim()', JETSKI_TITLE_FN_REGEX, 60, 120)) &&
+        Boolean(findByAnchorRegex(jkSrc, '.summary||"Untitled Conversation";', JETSKI_UEN_REGEX, 40, 20)) &&
+        Boolean(findByAnchorRegex(jkSrc, '.cascadeId,label:', JETSKI_SMA_REGEX, 40, 50))) ||
       isJetskiPatched(jkLive);
     const jkThoughtReady =
-      JETSKI_THOUGHT_PAIRS.every(([fromStr]) => jkSrc.includes(fromStr)) || isJetskiPatched(jkLive);
+      (Boolean(findByAnchorRegex(jkSrc, '>=0?`Thinking for ${Math.max(1,', JETSKI_THINKING_FOR_REGEX, 24, 80)) &&
+        Boolean(findByAnchorRegex(jkSrc, '?`Thought for ${Math.max(1,Number(', JETSKI_THOUGHT_FOR_REGEX, 24, 90)) &&
+        jkSrc.includes(JETSKI_THINKING_DOTS_TARGET)) ||
+      isJetskiPatched(jkLive);
     optionalAnchors.push({
       id: 'jetski_titles',
-      name: '独立智能体弹窗标题枢纽 (jetskiAgent est/uEn/sMa)',
+      name: '独立智能体弹窗标题枢纽 (jetskiAgent 抗混淆)',
       matched: jkTitleReady
     });
     optionalAnchors.push({
       id: 'jetski_thoughts',
-      name: '独立智能体弹窗思考标签 (jetskiAgent Thought 4处)',
+      name: '独立智能体弹窗思考标签 (jetskiAgent 抗混淆)',
       matched: jkThoughtReady
     });
   }
 
+  const coreCompatible = missingAnchors.length === 0;
+  const allFeaturesCompatible =
+    coreCompatible &&
+    coreMisses.length === 0 &&
+    featureModules.every(m => m.matched) &&
+    optionalAnchors.every(a => a.matched);
+
   return {
-    compatible: missingAnchors.length === 0,
+    compatible: coreCompatible,
+    fullyCompatible: allFeaturesCompatible,
     matchedAnchors,
     missingAnchors,
+    featureModules,
     optionalAnchors,
     codeLength: code.length
   };
 }
 
 /**
- * 阶段三：执行统一全自动无损重新编译与全量重注入（复用 core_injector.applyAllPatches）
+ * 阶段三：执行统一全自动无损重新编译与全量重注入
  */
 function applyFullLocalization(logger) {
   return applyAllPatches({
@@ -729,7 +721,7 @@ function applyFullLocalization(logger) {
 
 function showNotification(title, message) {
   try {
-    const vbs = `MsgBox "${message.replace(/"/g, '""')}", 48, "${title.replace(/"/g, '""')}"`;
+    const vbs = buildVbsNotificationScript(title, message);
     const tmpVbs = path.join(os.tmpdir(), 'agy_zh_notice.vbs');
     const bom = Buffer.from([0xff, 0xfe]);
     fs.writeFileSync(tmpVbs, Buffer.concat([bom, Buffer.from(vbs, 'utf16le')]));
@@ -749,16 +741,9 @@ function main() {
   // 1. 执行日志保留策略：写本次前仅保留最近 1 次历史运行（写入本次后文件内恰好保留最近 2 次）
   const purgeResult = pruneLogKeepLastRuns(LOG_FILE, 1, 500 * 1024);
 
-  // 2. 收集基础环境信息
-  let appVersion = '未知版本';
-  let distroCommit = '未知提交';
-  if (fs.existsSync(PACKAGE_JSON)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'));
-      appVersion = pkg.version || appVersion;
-      distroCommit = pkg.distro || distroCommit;
-    } catch (e) {}
-  }
+  // 2. 收集完整 4 维客户端身份信息
+  const appId = readInstalledAppIdentity(RESOURCES_APP);
+  const versionDisplay = formatAppIdentity(appId);
 
   const now = new Date();
   const timeStr =
@@ -772,7 +757,7 @@ function main() {
   appendLog(`【启动自检与全景监控日志】 ${timeStr}`);
   appendLog(`================================================================================`);
   appendLog(`[环境概要]`);
-  appendLog(`  • 客户端版本   : Antigravity IDE v${appVersion} (Distro: ${distroCommit.slice(0, 10)})`);
+  appendLog(`  • 客户端版本   : Antigravity ${versionDisplay}`);
   appendLog(`  • 宿主平台     : Windows ${os.release()} (${os.arch()}) | Node: ${process.version}`);
   appendLog(`  • 日志存储位置 : ${LOG_FILE}`);
   if (purgeResult.purgedRuns > 0) {
@@ -829,7 +814,15 @@ function main() {
   appendLog(`\n[综合判定与自愈决策]`);
 
   if (health.valid) {
-    appendLog(`  ✔ 结论: 汉化全链路健康就绪 (自检耗时: ${Date.now() - startTime}ms)`);
+    const skippedList = (readDeployMeta(EXT_DIR)?.skippedModules) || [];
+    if (skippedList.length > 0) {
+      appendLog(`  ⚠ 结论: 核心基础汉化运行正常，但当前存在 ${skippedList.length} 个已降级未生效模块 (自检耗时: ${Date.now() - startTime}ms)`);
+      for (const sk of skippedList) {
+        appendLog(`     • [未生效/降级] ${sk.module} -> ${sk.reason}`);
+      }
+    } else {
+      appendLog(`  ✔ 结论: 汉化全链路与全部增强功能 100% 健康就绪 (自检耗时: ${Date.now() - startTime}ms)`);
+    }
     appendLog(`  ✔ 动作: 准备拉起 Antigravity IDE 主进程...`);
   } else {
     appendLog(`  ⚠ 结论: 检测到汉化失效、源码升级或官方更新覆盖！`);
@@ -837,18 +830,24 @@ function main() {
       appendLog(`     • ${fail}`);
     }
 
-    appendLog(`\n[新版本特征指纹兼容性评估 (Compatibility Prober)]`);
+    appendLog(`\n[新版本分层抗混淆兼容性评估 (Tiered Compatibility Prober)]`);
     const candidatePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
     const probe = probeVersionCompatibility(candidatePath);
 
     const totalRequired = probe.matchedAnchors.length + probe.missingAnchors.length;
     appendLog(`  • 评估目标: ${candidatePath} (体积: ${formatBytes(probe.codeLength)})`);
-    appendLog(`  • 必选核心特征探测结果 (${probe.matchedAnchors.length}/${totalRequired} 项必选锚点):`);
+    appendLog(`  • 核心必选层探测 (${probe.matchedAnchors.length}/${totalRequired} 项):`);
     for (const anchor of probe.matchedAnchors) {
-      appendLog(`     ✔ [命中] ${anchor.name} (代码偏移: ${anchor.offset} 字节)`);
+      appendLog(`     ✔ [命中] ${anchor.name} (偏移: ${anchor.offset}${anchor.detail ? `, ${anchor.detail}` : ''})`);
     }
     for (const anchor of probe.missingAnchors) {
       appendLog(`     ❌ [缺失] ${anchor.name} -> "${anchor.pattern}"`);
+    }
+    if (probe.featureModules && probe.featureModules.length > 0) {
+      appendLog(`  • 独立增强模块评估 (${probe.featureModules.filter(m => m.matched).length}/${probe.featureModules.length} 项):`);
+      for (const mod of probe.featureModules) {
+        appendLog(`     ${mod.matched ? '✔ [兼容]' : '⚠ [将自动降级跳过]'} ${mod.name} (${mod.detail})`);
+      }
     }
     if (probe.optionalAnchors && probe.optionalAnchors.length > 0) {
       appendLog(`  • 外围增强特征评估 (${probe.optionalAnchors.filter(a => a.matched).length}/${probe.optionalAnchors.length} 项):`);
@@ -858,21 +857,38 @@ function main() {
     }
 
     if (probe.compatible) {
-      appendLog(`\n  🎉 评估结论: 新版本与当前汉化引擎 100% 兼容！开始执行统一全量自愈流水线...`);
+      const modeDesc = probe.fullyCompatible
+        ? '全核心与增强模块 100% 兼容，执行满血同步自愈...'
+        : '核心底座 100% 兼容，执行分层韧性同步自愈（不兼容增强模块自动安全降级跳过）...';
+      appendLog(`\n  🎉 评估结论: ${modeDesc}`);
       try {
         const healStart = Date.now();
-        applyFullLocalization(appendLog);
-        appendLog(`  ✔ 自适应全量自愈汉化完成！(自愈流水线耗时: ${Date.now() - healStart}ms)`);
+        const healRes = applyFullLocalization(appendLog);
+        const skipped = (healRes && healRes.buildReport && healRes.buildReport.skippedModules) || [];
+        appendLog(`  ✔ 自适应全量自愈汉化完成！(自愈流水线耗时: ${Date.now() - healStart}ms${skipped.length > 0 ? `，降级跳过 ${skipped.length} 个模块` : ''})`);
+        if (skipped.length > 0) {
+          const skipNames = skipped.map(s => s.module).join('、');
+          showNotification(
+            'Antigravity 汉化已同步适配（部分降级）',
+            `检测到 Antigravity 已更新至 ${versionDisplay}。\n核心中文界面已自动同步完成，可正常使用！\n\n以下增强模块因新版内部结构变化已安全跳过（不影响主界面稳定）：\n• ${skipNames}\n\n详细诊断报告：\n${LOG_FILE}`
+          );
+        }
       } catch (err) {
         appendLog(`  ❌ 自动汉化执行失败: ${err.message}`);
         appendLog(err.stack);
-        showNotification('Antigravity 汉化自愈警告', `自动重新汉化过程中遇到错误：\n${err.message}\n\n已为您保留原版启动，详细信息请查看日志。\n日志路径: ${LOG_FILE}`);
+        showNotification(
+          'Antigravity 汉化自愈警告',
+          `自动重新汉化过程中遇到错误：\n${err.message}\n\n已为您保留原版启动，详细信息请查看日志。\n日志路径: ${LOG_FILE}`
+        );
       }
     } else {
-      appendLog(`\n  🛑 评估结论: 检测到 Google 在新版本中重构了代码混淆符号，当前规则不完全兼容！`);
+      appendLog(`\n  🛑 评估结论: 检测到核心入口或底层结构不兼容，触发安全熔断！`);
       appendLog(`  🛡 防护策略: 坚守安全红线，终止自动注入，防止代码破坏或主窗口白屏。`);
-      appendLog(`  💡 处置建议: 保持官方原版启动，请将本日志提交维护者更新 build_ultimate_chinese_engine.js 中缺失的特征锚点。`);
-      showNotification('Antigravity IDE 汉化更新提示', `检测到 Antigravity IDE 进行了版本更新 (v${appVersion})。\n由于新版本重构了部分内部代码，现有汉化规则不完全适用。\n\n为确保正常使用，已保持官方原版启动，详细分析报告已写入日志：\n${LOG_FILE}`);
+      appendLog(`  💡 处置建议: 保持官方原版启动，请查看日志定位缺失的核心锚点。`);
+      showNotification(
+        'Antigravity IDE 汉化更新提示',
+        `检测到 Antigravity IDE 进行了版本更新 (${versionDisplay})。\n由于新版本重构了核心入口代码，现有规则暂不完全适用。\n\n为确保正常使用，已保持官方原版启动，详细分析报告已写入日志：\n${LOG_FILE}`
+      );
     }
   }
 
@@ -891,8 +907,6 @@ function main() {
   }
 
   appendLog(`--------------------------------------------------------------------------------\n`);
-
-  // 将全部格式化日志原子输出
   writeLog(logBuffer.join('\n'));
 }
 
@@ -904,5 +918,6 @@ module.exports = {
   inspectHealthDeeply,
   probeVersionCompatibility,
   applyFullLocalization,
-  pruneLogKeepLastRuns
+  pruneLogKeepLastRuns,
+  buildVbsNotificationScript
 };

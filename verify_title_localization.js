@@ -229,7 +229,7 @@ async function runTests() {
     }
   });
 
-  await test('hub_main_zh.js 关键注入指纹与 ELK 同名函数完整性校验', async () => {
+  await test('hub_main_zh.js 关键注入指纹与抗混淆绕过点完整性校验', async () => {
     const code = fs.readFileSync(ZH_MAIN_JS, 'utf8');
     const markers = [
       '__agyTitleAutoLocalizer',
@@ -237,25 +237,31 @@ async function runTests() {
       '/translate-title',
       '/log-title-persisted',
       'ConversationAnnotationsSchema',
-      'label:XB({cascadeId:a.cascadeId,title:a.title,summary:a.title})',
-      'a=XB({cascadeId:f,annotations:a.annotations,summary:d||a.summary})',
-      'title:XB(g)||',
-      'g=XB(d)||',
-      'function XB(a){var b;var c=new tD(Ok,"[","]");' // 确保 ELK 图形库 XB 完好
+      '软件界面中文化设置',
+      '未命名对话',
+      '父级对话'
     ];
     for (const m of markers) {
       assert.ok(code.includes(m), `部署产物缺少关键特征: ${m}`);
     }
+    const fnMatch = /function ([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\)\{\n  var _isStr = typeof/.exec(code);
+    assert.ok(fnMatch, '未找到抗混淆注入后的会话标题核心输出枢纽函数');
+    const fnName = fnMatch[1];
+    assert.ok(code.includes(`label:${fnName}({cascadeId:`), `搜索列表绕过点未调用 ${fnName}`);
+    assert.ok(code.includes(`title:${fnName}(`), `父级追溯绕过点未调用 ${fnName}`);
   });
 
-  await test('VM 沙盒提取新版 XB(a) 验证各类输入行为', async () => {
+  await test('VM 沙盒动态提取抗混淆会话标题输出枢纽验证各类输入行为', async () => {
+    const { findMatchingBraceEnd } = require('./src/core_injector');
     const code = fs.readFileSync(ZH_MAIN_JS, 'utf8');
-    const startIdx = code.indexOf('function XB(a){\n  var _isStr');
-    assert.notStrictEqual(startIdx, -1, '未定位到新版 XB(a) 源码起点');
-    const endMarker = 'var i3a=(a,b)=>{';
-    const endIdx = code.indexOf(endMarker, startIdx);
-    assert.notStrictEqual(endIdx, -1, '未定位到 XB(a) 源码终点');
-    const xbSource = code.slice(startIdx, endIdx);
+    const fnMatch = /function ([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\)\{\n  var _isStr = typeof/.exec(code);
+    assert.ok(fnMatch, '未定位到会话标题核心输出枢纽源码起点');
+    const fnName = fnMatch[1];
+    const startIdx = fnMatch.index;
+    const openBrace = code.indexOf('{', startIdx);
+    const closeBrace = findMatchingBraceEnd(code, openBrace);
+    assert.notStrictEqual(closeBrace, -1, '会话标题枢纽函数闭合花括号匹配失败');
+    const xbSource = code.slice(startIdx, closeBrace + 1);
 
     const sandbox = {
       window: {
@@ -268,7 +274,7 @@ async function runTests() {
       }
     };
     vm.runInNewContext(xbSource, sandbox);
-    const XB = sandbox.XB;
+    const XB = sandbox[fnName];
     assert.strictEqual(typeof XB, 'function');
 
     // 中文直通

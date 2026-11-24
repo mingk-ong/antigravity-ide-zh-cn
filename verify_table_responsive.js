@@ -15,7 +15,7 @@ const SRC_DIR = path.join(PATCH_DIR, 'src');
 const { getTargetPaths } = require('./src/config');
 const { agyExtDir } = getTargetPaths();
 const ZH_MAIN_JS = path.join(agyExtDir, 'hub_main_zh.js');
-const { resolveHubSourcePath, HUB_ZH_TABLE_FEATURE_MARKERS } = require('./src/core_injector');
+const { resolveHubSourcePath, locateTableModule, HUB_ZH_TABLE_FEATURE_MARKERS } = require('./src/core_injector');
 const { probeVersionCompatibility } = require('./src/auto_updater');
 
 function loadTableEngineFromBundle(bundlePath) {
@@ -233,26 +233,36 @@ async function runTests() {
       assert.ok(!fullCss.css.includes('table-layout: fixed'), 'full 模式不应锁定 table-layout: fixed');
     });
 
-    console.log('\n【第四组】更新自愈探针兼容与防白屏熔断验证');
+    console.log('\n【第四组】分层抗混淆自愈探针兼容与单模块安全降级验证');
 
-    await test('更新适配探针 23 项必选核心锚点命中 + 表格耦合符号改名熔断保护', async () => {
+    await test('分层抗混淆探针 6 项核心 + tableLayout 全命中 + 表格耦合符号改名自动安全降级保护', async () => {
       const hubSourcePath = resolveHubSourcePath(agyExtDir, PATCH_DIR);
       const probeOk = probeVersionCompatibility(hubSourcePath);
-      assert.strictEqual(probeOk.compatible, true, `当前官方版本应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
-      assert.strictEqual(probeOk.matchedAnchors.length, 23, `应命中全部 23 项必选锚点，实际=${probeOk.matchedAnchors.length}`);
+      assert.strictEqual(probeOk.compatible, true, `当前版本核心层应 100% 兼容，缺失项: ${JSON.stringify(probeOk.missingAnchors)}`);
+      assert.strictEqual(probeOk.fullyCompatible, true, `当前版本全部增强模块应 100% 兼容: ${JSON.stringify(probeOk.featureModules)}`);
+      assert.strictEqual(probeOk.matchedAnchors.length, 6, `应命中全部 6 项核心必选抗混淆锚点，实际=${probeOk.matchedAnchors.length}`);
+      const okTableMod = probeOk.featureModules.find(m => m.id === 'tableLayout');
+      assert.ok(okTableMod && okTableMod.matched === true, 'tableLayout 增强模块应处于满血兼容态');
 
-      // 模拟新版修改了 mkc 内部下拉菜单组件名 WW -> Z9，探针必须触发熔断
+      // 模拟新版破坏表格操作菜单核心结构（精准破坏表格菜单组件内部的 menuRoot 属性签名）：
+      // 核心层仍保持 compatible=true（保障整体同步汉化），同时 tableLayout 必须精准降级跳过 (matched=false) 防止白屏
       const rawHub = fs.readFileSync(hubSourcePath, 'utf8');
-      const mutated = rawHub.replace('D.createElement(WW,{open:f,onOpenChange:g}', 'D.createElement(Z9,{open:f,onOpenChange:g}');
-      assert.notStrictEqual(mutated, rawHub, '模拟变异必须实际修改到目标符号');
+      const tableLoc = locateTableModule(rawHub);
+      assert.strictEqual(tableLoc.matched, true, '变异前必须成功定位表格模块区间');
+      const tableSlice = rawHub.slice(tableLoc.tableStart, tableLoc.menuEnd);
+      const mutatedSlice = tableSlice.replace('{open:f,onOpenChange:g}', '{opened:f,onToggleOpen:g}');
+      assert.notStrictEqual(mutatedSlice, tableSlice, '模拟变异必须实际修改到表格菜单内部目标符号');
+      const mutated = rawHub.slice(0, tableLoc.tableStart) + mutatedSlice + rawHub.slice(tableLoc.menuEnd);
       const mutatedPath = path.join(tmpDir, 'mutated_table_hub.js');
       fs.writeFileSync(mutatedPath, mutated, 'utf8');
 
-      const probeBroken = probeVersionCompatibility(mutatedPath);
-      assert.strictEqual(probeBroken.compatible, false, '表格组件强耦合符号改名时探针必须触发熔断');
+      const probeDegraded = probeVersionCompatibility(mutatedPath);
+      assert.strictEqual(probeDegraded.compatible, true, '单个增强模块变动不应阻断核心汉化自动同步');
+      assert.strictEqual(probeDegraded.fullyCompatible, false, '应精准标记为部分降级态');
+      const degradedTableMod = probeDegraded.featureModules.find(m => m.id === 'tableLayout');
       assert.ok(
-        probeBroken.missingAnchors.some(a => a.id === 'table_coupled_symbols'),
-        `熔断报告应精准定位 table_coupled_symbols，实际=${JSON.stringify(probeBroken.missingAnchors)}`
+        degradedTableMod && degradedTableMod.matched === false && degradedTableMod.detail.includes('menuRoot'),
+        `降级报告应精准定位 tableLayout 缺失符号 menuRoot，实际=${JSON.stringify(degradedTableMod)}`
       );
     });
   } finally {

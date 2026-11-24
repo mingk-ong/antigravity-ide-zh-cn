@@ -40,13 +40,15 @@ function runRestore() {
     }
   }
 
-  // 清理代理模块、翻译微服务与中文 Hub 静态资源
+  // 清理代理模块、翻译微服务、热捕获源与中文 Hub 静态资源
   const filesToDelete = [
     path.join(agyExtDir, 'hub_proxy.js'),
     path.join(agyExtDir, 'hub_main_zh.js'),
+    path.join(agyExtDir, 'hub_main.js'),
     path.join(agyExtDir, 'title_translator.js'),
     path.join(agyExtDir, 'thought_translator.js'),
-    path.join(agyExtDir, '.agy_zh_meta.json')
+    path.join(agyExtDir, '.agy_zh_meta.json'),
+    path.join(agyExtDir, '.agy_build_report.json')
   ];
 
   for (const f of filesToDelete) {

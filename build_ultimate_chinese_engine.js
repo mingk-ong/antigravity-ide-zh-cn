@@ -1,6 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const { getTargetPaths } = require('./src/config');
+const {
+  findByAnchorRegex,
+  locateTitleRpcModule,
+  locateThoughtModule,
+  locateTableModule
+} = require('./src/core_injector');
 
 const { agyExtDir } = getTargetPaths();
 const localSrcPath = path.join(__dirname, 'hub_main.js');
@@ -293,62 +300,124 @@ const actionWords = {
 };
 
 // =========================================================================
-// 2. 注入核心拦截器 (Code Injections)
+// 2. 抗混淆结构化注入与分级韧性引擎 (Anti-Obfuscation & Tiered Resilience)
+//    - 基础核心层 (core)：抗混淆动态定位 vT/uT/yT/xT/sT + 静态词条 + DOM 清洗器
+//    - 独立增强层 (titleHub / titleRpc / thought / table)：各自前置校验耦合符号，
+//      兼容则全量注入，新版重构单个模块时自动安全降级跳过该模块，绝不拖垮整体汉化
 // =========================================================================
 
-// 2.1 注入 vT 导航名称
-const vtTarget = 'function vT(a){return CKb.get(a)??a}';
-const vtReplacement = `function vT(a){
-  const _screens = ${JSON.stringify(screenTitles)};
-  return _screens[a] || (CKb.get(a) ?? a);
-}`;
-code = code.replace(vtTarget, vtReplacement);
+const STRICT_MODE = process.argv.includes('--strict');
+const moduleStatus = {
+  coreSettings: { enabled: false, hits: [], missing: [] },
+  titleHub: { enabled: false, reason: '' },
+  titleRpc: { enabled: false, reason: '' },
+  thoughtHeader: { enabled: false, reason: '' },
+  thoughtStream: { enabled: false, reason: '' },
+  tableLayout: { enabled: false, reason: '' }
+};
+const skippedModules = [];
+const activeOutputMarkers = [];
 
-// 2.2 注入 uT 页面大标题与长篇说明
-const utTarget = 'var zKb=D.createContext(!1),uT=({title:a,description:b,children:c,scrollable:d=!0,headerRight:f,onBack:g})=>{';
-const utReplacement = `var zKb=D.createContext(!1),uT=({title:a,description:b,children:c,scrollable:d=!0,headerRight:f,onBack:g})=>{
+function recordSkipped(modName, reason) {
+  skippedModules.push({ module: modName, reason });
+  console.warn(`⚠ [降级跳过] ${modName}: ${reason}`);
+}
+
+// 2.1 抗混淆注入 vT 导航名称（窄窗口动态捕获函数名、参数名与路由 Map 变量名）
+const vtRegex = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return ([A-Za-z_$][\w$]*)\.get\(\2\)\?\?\2\}/;
+const vtMatch = findByAnchorRegex(code, '){return ', vtRegex, 30, 60);
+if (vtMatch) {
+  const [vtFull, vtFn, vtArg, vtMap] = vtMatch;
+  const vtReplacement = `function ${vtFn}(${vtArg}){
+  const _screens = ${JSON.stringify(screenTitles)};
+  return _screens[${vtArg}] || (${vtMap}.get(${vtArg}) ?? ${vtArg});
+}`;
+  code = code.slice(0, vtMatch.index) + vtReplacement + code.slice(vtMatch.index + vtFull.length);
+  moduleStatus.coreSettings.hits.push(`vT(${vtFn})`);
+} else {
+  moduleStatus.coreSettings.missing.push('vT');
+}
+
+// 2.2 抗混淆注入 uT 页面大标题与长篇说明（窄窗口动态捕获组件名与解构参数名）
+const utRegex = /([A-Za-z_$][\w$]*)=\(\{title:([A-Za-z_$][\w$]*),description:([A-Za-z_$][\w$]*),children:([A-Za-z_$][\w$]*),scrollable:([A-Za-z_$][\w$]*)=!0,headerRight:([A-Za-z_$][\w$]*),onBack:([A-Za-z_$][\w$]*)\}\)=>\{/;
+const utMatch = findByAnchorRegex(code, ',scrollable:', utRegex, 90, 90);
+if (utMatch) {
+  const [utFull, utFn, utTitle, utDesc] = utMatch;
+  const utInject = `
   const _titles = ${JSON.stringify(utTitles)};
   const _descs = ${JSON.stringify(utDescriptions)};
-  if (typeof a === 'string' && _titles[a]) a = _titles[a];
-  if (typeof b === 'string' && _descs[b]) b = _descs[b];
+  if (typeof ${utTitle} === 'string' && _titles[${utTitle}]) ${utTitle} = _titles[${utTitle}];
+  if (typeof ${utDesc} === 'string' && _descs[${utDesc}]) ${utDesc} = _descs[${utDesc}];
 `;
-code = code.replace(utTarget, utReplacement);
+  code = code.slice(0, utMatch.index) + utFull + utInject + code.slice(utMatch.index + utFull.length);
+  moduleStatus.coreSettings.hits.push(`uT(${utFn})`);
+} else {
+  moduleStatus.coreSettings.missing.push('uT');
+}
 
-// 2.3 注入 yT 分区标题
-const ytTarget = 'var yT=({title:a,subtitle:b,headerRight:c,id:d,count:f,collapsible:g=!1,defaultCollapsed:h=!1,forceExpanded:k=!1,children:l})=>{';
-const ytReplacement = `var yT=({title:a,subtitle:b,headerRight:c,id:d,count:f,collapsible:g=!1,defaultCollapsed:h=!1,forceExpanded:k=!1,children:l})=>{
+// 2.3 抗混淆注入 yT 分区标题（窄窗口动态捕获组件名与 title 参数名）
+const ytRegex = /([A-Za-z_$][\w$]*)=\(\{title:([A-Za-z_$][\w$]*),subtitle:([A-Za-z_$][\w$]*),headerRight:([A-Za-z_$][\w$]*),id:([A-Za-z_$][\w$]*),count:([A-Za-z_$][\w$]*),collapsible:([A-Za-z_$][\w$]*)=!1,defaultCollapsed:([A-Za-z_$][\w$]*)=!1,forceExpanded:([A-Za-z_$][\w$]*)=!1,children:([A-Za-z_$][\w$]*)\}\)=>\{/;
+const ytMatch = findByAnchorRegex(code, ',defaultCollapsed:', ytRegex, 140, 90);
+if (ytMatch) {
+  const [ytFull, ytFn, ytTitle] = ytMatch;
+  const ytInject = `
   const _secTitles = ${JSON.stringify(sectionTitles)};
-  if (typeof a === 'string' && _secTitles[a]) a = _secTitles[a];
+  if (typeof ${ytTitle} === 'string' && _secTitles[${ytTitle}]) ${ytTitle} = _secTitles[${ytTitle}];
 `;
-code = code.replace(ytTarget, ytReplacement);
+  code = code.slice(0, ytMatch.index) + ytFull + ytInject + code.slice(ytMatch.index + ytFull.length);
+  moduleStatus.coreSettings.hits.push(`yT(${ytFn})`);
+} else {
+  moduleStatus.coreSettings.missing.push('yT');
+}
 
-// 2.4 注入 xT 卡片行渲染器
-const xtStart = 'var xT=({label:a,description:b,rightElement:c,extraContent:d,badge:f,alignItems:g="center",unpadded:h=!1,labelId:k,descriptionId:l,disabled:m=!1,"data-testid":n})=>';
-const xtIdx = code.indexOf(xtStart);
-const nextVar = code.indexOf(';var ', xtIdx);
-const oldXt = code.slice(xtIdx, nextVar + 1);
-
-const newXt = `var xT=({label:a,description:b,rightElement:c,extraContent:d,badge:f,alignItems:g="center",unpadded:h=!1,labelId:k,descriptionId:l,disabled:m=!1,"data-testid":n})=>{
+// 2.4 抗混淆注入 xT 卡片行渲染器（窄窗口定位，原样保留官方 JSX）
+const xtRegex = /var ([A-Za-z_$][\w$]*)=\(\{label:([A-Za-z_$][\w$]*),description:([A-Za-z_$][\w$]*),rightElement:([A-Za-z_$][\w$]*),extraContent:([A-Za-z_$][\w$]*),badge:([A-Za-z_$][\w$]*),alignItems:([A-Za-z_$][\w$]*)=["']center["'],unpadded:([A-Za-z_$][\w$]*)=!1,labelId:([A-Za-z_$][\w$]*),descriptionId:([A-Za-z_$][\w$]*),disabled:([A-Za-z_$][\w$]*)=!1,"data-testid":([A-Za-z_$][\w$]*)\}\)=>/;
+const xtMatch = findByAnchorRegex(code, ',unpadded:', xtRegex, 180, 120);
+if (xtMatch) {
+  const [xtHead, xtFn, xtLbl, xtDesc] = xtMatch;
+  const xtBodyStart = xtMatch.index + xtHead.length;
+  const nextVar = code.indexOf(';var ', xtBodyStart);
+  if (nextVar !== -1) {
+    const origBody = code.slice(xtBodyStart, nextVar);
+    let newXt;
+    if (origBody.startsWith('{')) {
+      newXt = `${xtHead}{
   const _labels = ${JSON.stringify(rowLabels)};
   const _descs = ${JSON.stringify(rowDescriptions)};
-  if (typeof a === 'string' && _labels[a]) a = _labels[a];
-  if (typeof b === 'string' && _descs[b]) b = _descs[b];
-  return D.createElement("div",{"data-testid":n,"data-disabled":m?"true":void 0,className:\`\${h?"":"py-2 px-3"} w-full bg-transparent flex justify-between gap-4 \${g==="start"?"items-start":"items-center"}\`},D.createElement("div",{className:"flex-1 flex flex-col gap-0.5"},D.createElement("div",{className:"flex items-center gap-1.5"},D.createElement("span",
-{className:m?"text-muted-foreground":"",id:k},a),f!==void 0&&f!==null&&D.createElement("span",{"data-testid":"settings-row-badge",className:"text-[10px] font-semibold leading-none bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded-full select-none border border-border"},f)),b&&D.createElement("span",{className:"text-sm text-muted-foreground whitespace-pre-wrap",id:l},b),d&&D.createElement("div",{className:"w-full"},d)),c&&D.createElement("div",{className:"shrink-0"},c));
-};`;
-code = code.replace(oldXt, newXt);
-
-// 2.4.1 注入 XB 会话标题核心输出枢纽（含中文直通、占位符显示映射、持久化缓存/历史全量字典兜底）
-const xbTarget = 'function XB(a){var b=a?.annotations?.title?.trim();return a?.annotations?.coordinator?b||"Coordinator":b||a?.summary?.trim()||void 0}';
-if (!code.includes(xbTarget)) {
-  throw new Error('❌ 未在 hub_main.js 中找到 XB(a) 目标函数签名，终止编译！');
+  if (typeof ${xtLbl} === 'string' && _labels[${xtLbl}]) ${xtLbl} = _labels[${xtLbl}];
+  if (typeof ${xtDesc} === 'string' && _descs[${xtDesc}]) ${xtDesc} = _descs[${xtDesc}];
+${origBody.slice(1)}`;
+    } else {
+      newXt = `${xtHead}{
+  const _labels = ${JSON.stringify(rowLabels)};
+  const _descs = ${JSON.stringify(rowDescriptions)};
+  if (typeof ${xtLbl} === 'string' && _labels[${xtLbl}]) ${xtLbl} = _labels[${xtLbl}];
+  if (typeof ${xtDesc} === 'string' && _descs[${xtDesc}]) ${xtDesc} = _descs[${xtDesc}];
+  return (${origBody});
+}`;
+    }
+    code = code.slice(0, xtMatch.index) + newXt + code.slice(nextVar);
+    moduleStatus.coreSettings.hits.push(`xT(${xtFn})`);
+  } else {
+    moduleStatus.coreSettings.missing.push('xT_end');
+  }
+} else {
+  moduleStatus.coreSettings.missing.push('xT');
 }
-const xbReplacement = `function XB(a){
-  var _isStr = typeof a === 'string';
-  var _isCoord = !_isStr && !!(a && a.annotations && a.annotations.coordinator);
+
+// 2.4.1 模块 A：抗混淆注入 XB 会话标题核心输出枢纽（窄窗口动态捕获真实函数名）
+const xbRegex = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{var ([A-Za-z_$][\w$]*)=\2\?\.annotations\?\.title\?\.trim\(\);return \2\?\.annotations\?\.coordinator\?\3\|\|"Coordinator":\3\|\|\2\?\.summary\?\.trim\(\)\|\|void 0\}/;
+const xbMatch = findByAnchorRegex(code, '?.annotations?.coordinator?', xbRegex, 100, 120);
+let resolvedTitleFnName = '';
+if (xbMatch) {
+  const [xbFull, xbFn, xbArg] = xbMatch;
+  resolvedTitleFnName = xbFn;
+  const xbReplacement = `function ${xbFn}(${xbArg}){
+  var _isStr = typeof ${xbArg} === 'string';
+  var _isCoord = !_isStr && !!(${xbArg} && ${xbArg}.annotations && ${xbArg}.annotations.coordinator);
   var _raw = _isStr
-    ? a.trim()
-    : (a?.annotations?.title?.trim() || a?.summary?.trim() || a?.title?.trim() || void 0);
+    ? ${xbArg}.trim()
+    : (${xbArg}?.annotations?.title?.trim() || ${xbArg}?.summary?.trim() || ${xbArg}?.title?.trim() || void 0);
   if (!_raw) return _isCoord ? "智能体助手" : void 0;
   if (/[\\u4e00-\\u9fa5]/.test(_raw)) return _raw;
   if (_raw === "Untitled Conversation") return "未命名对话";
@@ -358,7 +427,7 @@ const xbReplacement = `function XB(a){
   var _im = ${JSON.stringify(mergedIdToZh)};
   var _pm = ${JSON.stringify(mergedEnToZh)};
   var _pmLow = ${JSON.stringify(mergedLowerEnToZh)};
-  var _cid = !_isStr ? (a?.cascadeId || a?.id) : void 0;
+  var _cid = !_isStr ? (${xbArg}?.cascadeId || ${xbArg}?.id) : void 0;
   if (typeof window !== 'undefined') {
     if (_cid && window.__agyZhIdCache && window.__agyZhIdCache[_cid]) return window.__agyZhIdCache[_cid];
     if (window.__agyZhTitleCache && window.__agyZhTitleCache[_raw]) return window.__agyZhTitleCache[_raw];
@@ -375,48 +444,72 @@ const xbReplacement = `function XB(a){
   if (_pmLow[_low]) return _pmLow[_low];
   return _raw;
 }`;
-code = code.replace(xbTarget, xbReplacement);
-console.log('✔ [锚点 1/12] 已重建 XB(a) 会话标题输出枢纽');
+  code = code.slice(0, xbMatch.index) + xbReplacement + code.slice(xbMatch.index + xbFull.length);
+  console.log(`✔ [锚点 1/12] 已重建 ${xbFn}(${xbArg}) 会话标题输出枢纽`);
 
-// 2.4.2 封堵 4 处绕过 XB(a) 直接读取 annotations?.title / title 的渲染点
-const bypassRules = [
-  {
-    name: '搜索结果列表项 label',
-    from: 'label:a.title||"Untitled Conversation"',
-    to: 'label:XB({cascadeId:a.cascadeId,title:a.title,summary:a.title})||a.title||"未命名对话"'
-  },
-  {
-    name: '活跃会话索引列表 ($2a)',
-    from: 'a=a.annotations?.title||d||`Conversation ${f.slice(0,8)}`',
-    to: 'a=XB({cascadeId:f,annotations:a.annotations,summary:d||a.summary})||a.annotations?.title||d||`对话 ${f.slice(0,8)}`'
-  },
-  {
-    name: '父级追溯链路标题 (OYc)',
-    from: 'title:g?.annotations?.title?.trim()||g?.summary||"Parent Conversation"',
-    to: 'title:XB(g)||g?.annotations?.title?.trim()||g?.summary||"父级对话"'
-  },
-  {
-    name: '上下文引用作用域条目标题',
-    from: 'g=d.annotations?.title?.trim()||g;',
-    to: 'g=XB(d)||d.annotations?.title?.trim()||g;'
-  }
-];
+  // 2.4.2 抗混淆封堵 4 处绕过标题枢纽直接读取 annotations?.title / title 的渲染点（窄窗口毫秒级定位）
+  const bypassRegexRules = [
+    {
+      name: '搜索结果列表项 label',
+      anchor: '.title||"Untitled Conversation"',
+      regex: /label:([A-Za-z_$][\w$]*)\.title\|\|"Untitled Conversation"/,
+      build: (m) => `label:${xbFn}({cascadeId:${m[1]}.cascadeId,title:${m[1]}.title,summary:${m[1]}.title})||${m[1]}.title||"未命名对话"`
+    },
+    {
+      name: '活跃会话索引列表 ($2a)',
+      anchor: '||`Conversation ${',
+      regex: /([A-Za-z_$][\w$]*)=\1\.annotations\?\.title\|\|([A-Za-z_$][\w$]*)\|\|`Conversation \$\{([A-Za-z_$][\w$]*)\.slice\(0,8\)\}`/,
+      build: (m) => `${m[1]}=${xbFn}({cascadeId:${m[3]},annotations:${m[1]}.annotations,summary:${m[2]}||${m[1]}.summary})||${m[1]}.annotations?.title||${m[2]}||\`对话 \${${m[3]}.slice(0,8)}\``
+    },
+    {
+      name: '父级追溯链路标题 (OYc)',
+      anchor: '||"Parent Conversation"',
+      regex: /title:([A-Za-z_$][\w$]*)\?\.annotations\?\.title\?\.trim\(\)\|\|\1\?\.summary\|\|"Parent Conversation"/,
+      build: (m) => `title:${xbFn}(${m[1]})||${m[1]}?.annotations?.title?.trim()||${m[1]}?.summary||"父级对话"`
+    },
+    {
+      name: '上下文引用作用域条目标题',
+      anchor: '.annotations?.title?.trim()||',
+      regex: /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.annotations\?\.title\?\.trim\(\)\|\|\1;/,
+      build: (m) => `${m[1]}=${xbFn}(${m[2]})||${m[2]}.annotations?.title?.trim()||${m[1]};`
+    }
+  ];
 
-for (let i = 0; i < bypassRules.length; i++) {
-  const rule = bypassRules[i];
-  if (!code.includes(rule.from)) {
-    throw new Error(`❌ 未命中绕过点 [${rule.name}]: ${rule.from}`);
+  let bypassHits = 0;
+  for (let i = 0; i < bypassRegexRules.length; i++) {
+    const rule = bypassRegexRules[i];
+    const bm = findByAnchorRegex(code, rule.anchor, rule.regex, 80, 60);
+    if (bm) {
+      const rep = rule.build(bm);
+      code = code.slice(0, bm.index) + rep + code.slice(bm.index + bm[0].length);
+      bypassHits++;
+      console.log(`✔ [锚点 ${i + 2}/12] 已封堵绕过点: ${rule.name}`);
+    } else if (STRICT_MODE) {
+      throw new Error(`❌ 未命中绕过点 [${rule.name}]`);
+    } else {
+      console.warn(`⚠ [降级跳过] 标题绕过点未命中: ${rule.name}`);
+    }
   }
-  code = code.replace(rule.from, rule.to);
-  console.log(`✔ [锚点 ${i + 2}/12] 已封堵绕过点: ${rule.name}`);
+  moduleStatus.titleHub = { enabled: true, fnName: xbFn, bypassHits };
+  activeOutputMarkers.push('软件界面中文化设置');
+} else if (STRICT_MODE) {
+  throw new Error('❌ 未在 hub_main.js 中找到会话标题枢纽函数签名，终止编译！');
+} else {
+  moduleStatus.titleHub = { enabled: false, reason: '未匹配到标题枢纽函数签名' };
+  recordSkipped('会话标题显示枢纽 (XB)', '未匹配到标题枢纽函数签名');
 }
 
-// 2.4.3 在 Hub 根组件 vcc 注入实时 Redux 监听与原生 RPC 自动翻译持久化守卫
-const vccAnchor = 'var vcc=()=>{var a=SO(),b=Xk(),c=ZP(),d=xQ(),{updateConversationAnnotations:f}=PB(),g=tC(),h=wQ();';
-if (!code.includes(vccAnchor)) {
-  throw new Error('❌ 未找到 vcc 根组件挂载锚点，终止编译！');
-}
-const vccWatcherBlock = `(0,D.useEffect)(()=>{
+// 2.4.3 模块 A-RPC：全抗混淆注入实时 Redux 监听与原生 RPC 自动翻译持久化守卫（兼容 vcc / sjc 等任意混淆名）
+const rpcLoc = locateTitleRpcModule(code);
+if (rpcLoc.matched) {
+  const _R = rpcLoc.reactVar;
+  const _S = rpcLoc.storeVar;
+  const _RPC = rpcLoc.rpcVar;
+  const _START = rpcLoc.startingFn;
+  const _CRT = rpcLoc.createFn;
+  const _PB = rpcLoc.pbMod;
+  const _ACT = rpcLoc.patchActionFn;
+  const vccWatcherBlock = `(0,${_R}.useEffect)(()=>{
   try{
     if(typeof window==='undefined')return;
     if(window.location&&window.location.pathname&&window.location.pathname.indexOf('settings')!==-1)return;
@@ -468,14 +561,14 @@ const vccWatcherBlock = `(0,D.useEffect)(()=>{
                 window.__agyZhTitleCache[_raw]=_data.translated;
                 window.__agyZhIdCache[_cid]=_data.translated;
                 if(_data.persistable===true){
-                  var _curState=b.getState();
-                  var _curMap=_curState?.trajectorySummaries?.summaries||(typeof Ml!=='undefined'?Ml.summaries:void 0)||{};
+                  var _curState=${_S}.getState();
+                  var _curMap=_curState?.trajectorySummaries?.summaries||{};
                   var _curSummary=_curMap[_cid];
                   var _curRaw=_curSummary?.annotations?.title?.trim()||_curSummary?.summary?.trim()||'';
                   if(!_curRaw||!/[\\u4e00-\\u9fa5]/.test(_curRaw)){
-                    if(typeof f==='function'){
-                      await f([_cid],dc(Df.ConversationAnnotationsSchema,{title:_data.translated}),!0);
-                      try{b.dispatch(Ll({cascadeId:_cid,annotations:{title:_data.translated}}));}catch(_de){}
+                    if(typeof ${_RPC}==='function'){
+                      await ${_RPC}([_cid],${_CRT}(${_PB}.ConversationAnnotationsSchema,{title:_data.translated}),!0);
+                      try{${_S}.dispatch(${_ACT}({cascadeId:_cid,annotations:{title:_data.translated}}));}catch(_de){}
                       _st.idAttempts.set(_cid,(_st.idAttempts.get(_cid)||0)+1);
                       try{fetch('/log-title-persisted?id='+encodeURIComponent(_cid)+'&from='+encodeURIComponent(_raw)+'&to='+encodeURIComponent(_data.translated)+'&source='+encodeURIComponent(_data.source||'')).catch(function(){});}catch(_le){}
                     }
@@ -507,10 +600,10 @@ const vccWatcherBlock = `(0,D.useEffect)(()=>{
     };
     var _scanSummaries=function(){
       try{
-        var _state=b.getState();
-        var _summaries=_state?.trajectorySummaries?.summaries||(typeof Ml!=='undefined'?Ml.summaries:void 0);
+        var _state=${_S}.getState();
+        var _summaries=_state?.trajectorySummaries?.summaries;
         if(!_summaries)return;
-        var _startingSet=new Set((typeof dwa==='function'?dwa(_state):[])||[]);
+        var _startingSet=new Set((typeof ${_START}==='function'?${_START}(_state):[])||[]);
         var _queuedIds=new Set(_st.queue.map(function(_q){return _q.cid;}));
         var _candidates=[];
         var _keys=Object.keys(_summaries);
@@ -537,7 +630,7 @@ const vccWatcherBlock = `(0,D.useEffect)(()=>{
     };
     var _timer=null;
     var _initTimer=setTimeout(_scanSummaries,600);
-    var _unsub=b.subscribe(function(){
+    var _unsub=${_S}.subscribe(function(){
       clearTimeout(_timer);
       _timer=setTimeout(_scanSummaries,800);
     });
@@ -547,17 +640,34 @@ const vccWatcherBlock = `(0,D.useEffect)(()=>{
       try{if(typeof _unsub==='function')_unsub();}catch(_ue){}
     };
   }catch(_ee){}
-},[b,f]);`;
-code = code.replace(vccAnchor, vccAnchor + vccWatcherBlock);
-console.log('✔ [锚点 6/12] 已注入 vcc 实时监听与原生 RPC 标题持久化守卫');
-
-// 2.4.4 思维链头部计时与侧边追问标签静态汉化 (hAc / 侧边追问)
-const hacTarget = 'd>=0?`Thinking for ${Math.max(1,d)}s`:"Thinking"';
-if (!code.includes(hacTarget)) {
-  throw new Error('❌ 未找到 hAc 思考计时头部锚点，终止编译！');
+},[${_S},${_RPC}]);`;
+  code = code.slice(0, rpcLoc.insertPos) + vccWatcherBlock + code.slice(rpcLoc.insertPos);
+  console.log(`✔ [锚点 6/12] 已抗混淆注入 ${rpcLoc.compName} 实时监听与原生 RPC 标题持久化守卫 (React=${_R}, action=${_ACT})`);
+  moduleStatus.titleRpc = { enabled: true, compName: rpcLoc.compName };
+  activeOutputMarkers.push('__agyTitleAutoLocalizer', 'updateConversationAnnotations', '/translate-title', 'ConversationAnnotationsSchema');
+} else if (STRICT_MODE) {
+  throw new Error(`❌ 未找到会话标题 RPC 挂载锚点: ${rpcLoc.reason}`);
+} else {
+  moduleStatus.titleRpc = { enabled: false, reason: rpcLoc.reason };
+  recordSkipped('会话标题 RPC 自动持久化守卫 (vcc/sjc)', rpcLoc.reason);
 }
-code = code.replace(hacTarget, 'd>=0?`已思考 ${Math.max(1,d)} 秒`:"正在思考"');
-console.log('✔ [锚点 7/12] 已汉化 hAc 思考耗时头部动画文案');
+
+// 2.4.4 思维链头部计时与侧边追问标签静态汉化（窄窗口抗混淆正则）
+const hacRegex = /([A-Za-z_$][\w$]*)>=0\?`Thinking for \$\{Math\.max\(1,\1\)\}s`:"Thinking"/;
+const hacMatch = findByAnchorRegex(code, '>=0?`Thinking for ${Math.max(1,', hacRegex, 24, 60);
+if (hacMatch) {
+  const hacVar = hacMatch[1];
+  const hacRep = `${hacVar}>=0?\`已思考 \${Math.max(1,${hacVar})} 秒\`:"正在思考"`;
+  code = code.slice(0, hacMatch.index) + hacRep + code.slice(hacMatch.index + hacMatch[0].length);
+  console.log('✔ [锚点 7/12] 已汉化 hAc 思考耗时头部动画文案');
+  moduleStatus.thoughtHeader = { enabled: true };
+  activeOutputMarkers.push('已思考 ');
+} else if (STRICT_MODE) {
+  throw new Error('❌ 未找到 hAc 思考计时头部锚点，终止编译！');
+} else {
+  moduleStatus.thoughtHeader = { enabled: false, reason: '未匹配到 Thinking for 计时文案' };
+  recordSkipped('思维链计时头部文案 (hAc)', '未匹配到 Thinking for 计时文案');
+}
 
 // 侧边追问 (Side Question) 中的思考标签静态汉化
 const sideThoughtPairs = [
@@ -584,30 +694,34 @@ for (const sp of sideThoughtPairs) {
   }
 }
 
-// 2.4.5 核心注入：重构 iAc 思维链组件（语义边界增量锁定 + 450ms 批处理防抖 + 原文/译文切换）
-const iacStartMarker = 'var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{';
-const iacIdx = code.indexOf(iacStartMarker);
-if (iacIdx === -1) {
-  throw new Error('❌ 未找到 iAc 思维链渲染组件起点，终止编译！');
-}
-const iacEndIdx = code.indexOf(';var jAc=', iacIdx);
-if (iacEndIdx === -1) {
-  throw new Error('❌ 未找到 iAc 思维链渲染组件终点 (;var jAc=)，终止编译！');
-}
-const oldIac = code.slice(iacIdx, iacEndIdx + 1);
-const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{
-  var {renderers:{markdown:g},verboseAgentChat:h}=tI(),
-    k=h??!1,
-    l=d5b()===J.CascadeRunStatus.RUNNING,
-    m=(d===J.CortexStepStatus.RUNNING||d===J.CortexStepStatus.GENERATING)&&l&&!f&&!b;
-  var _feat=Fj(),_n=pqc(),_steer=_feat.get("conversationView")?.trajectorySteering,_steerBtn=_steer?.SteerButton,_steerEd=_steer?.SteerableThoughtEditor;
+// 2.4.5 模块 B：全抗混淆重构思维链组件（动态捕获全部内部符号 + 零变量遮蔽，兼容 iAc / rTc 及任意混淆名）
+const thoughtLoc = locateThoughtModule(code);
+if (thoughtLoc.matched) {
+  const _TR = thoughtLoc.reactVar;
+  const _TCTX = thoughtLoc.ctxHook;
+  const _TRUN = thoughtLoc.runStatusHook;
+  const _TENUM = thoughtLoc.enumObj;
+  const _TANIM = thoughtLoc.animHook;
+  const _TSHIM = thoughtLoc.shimmerComp;
+  const _THEAD = thoughtLoc.headerComp;
+  const _TCOL = thoughtLoc.collapseComp;
+  const _steerInit = thoughtLoc.featHook
+    ? `var _feat=${thoughtLoc.featHook}(),_steer=_feat.get("conversationView")?.trajectorySteering,_steerBtn=_steer?.SteerButton,_steerEd=_steer?.SteerableThoughtEditor;`
+    : `var _steerBtn=null,_steerEd=null;`;
+  const newThoughtComp = `var ${thoughtLoc.compName}=({thinking:a,thinkingDuration:b,metadata:c,status:d,stepHasNonThinkingContent:f})=>{
+  var {renderers:{markdown:_md},verboseAgentChat:_verbose}=${_TCTX}(),
+    _k=_verbose??!1,
+    _l=${_TRUN}()!==void 0&&${_TRUN}()=== ${_TENUM}.CascadeRunStatus.RUNNING,
+    _m=(d===${_TENUM}.CortexStepStatus.RUNNING||d===${_TENUM}.CortexStepStatus.GENERATING)&&_l&&!f&&!b;
+  var _n=${_TANIM}();
+  ${_steerInit}
   var _engBoot=typeof window!=="undefined"?window.__agyThoughtEngine:null;
   var _stepInfo=c?.sourceTrajectoryStepInfo;
   var _stepKey=_stepInfo?(_stepInfo.trajectoryId+":"+_stepInfo.stepIndex):(_engBoot&&a?("txt:"+_engBoot.hashKey(_engBoot.normalize(String(a).slice(0,120)))):"anon");
   var _initUi=_engBoot?_engBoot.getStepUiState(_stepKey):null;
   var _initLocked=!!(_initUi&&!_initUi.manualClosed&&_initUi.locked);
   var _initNeedShortHold=!1;
-  if(!m&&_initUi&&_initUi.wasActive&&!_initUi.manualClosed&&!_initUi.graceDone&&!_initLocked&&!_initUi.hovered&&!_initUi.pinnedByHover&&!(_initUi.graceUntil&&_initUi.graceUntil>Date.now())&&_engBoot&&a){
+  if(!_m&&_initUi&&_initUi.wasActive&&!_initUi.manualClosed&&!_initUi.graceDone&&!_initLocked&&!_initUi.hovered&&!_initUi.pinnedByHover&&!(_initUi.graceUntil&&_initUi.graceUntil>Date.now())&&_engBoot&&a){
     try{
       var _initParts=_engBoot.splitThoughtSegments(a,!1);
       for(var _ii=0;_ii<_initParts.length;_ii++){
@@ -620,27 +734,27 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
     }catch(_ie){}
   }
   var _initHold=!!(_initUi&&!_initUi.manualClosed&&(_initLocked||_initUi.hovered||_initUi.pinnedByHover||_initNeedShortHold||(_initUi.graceUntil&&_initUi.graceUntil>Date.now())));
-  var [_exp,_setExp]=(0,D.useState)(m||_initHold);
-  var [_holdActive,_setHoldActive]=(0,D.useState)(_initHold);
-  var [_locked,_setLocked]=(0,D.useState)(_initLocked);
-  var [_showOrig,_setShowOrig]=(0,D.useState)(!!(_initUi&&_initUi.showOrig));
-  var [_tick,_setTick]=(0,D.useState)(0);
-  var [_translating,_setTranslating]=(0,D.useState)(!1);
-  var _wrapRef=(0,D.useRef)(null);
-  var _prevMRef=(0,D.useRef)(m);
-  var _wasActiveRef=(0,D.useRef)(m||!!(_initUi&&_initUi.wasActive));
-  var _firstWaveSentRef=(0,D.useRef)(!!(_initUi&&_initUi.firstWaveSent));
-  var _lockedRef=(0,D.useRef)(_initLocked);
-  var _hoveredRef=(0,D.useRef)(!!(_initUi&&(_initUi.hovered||_initUi.pinnedByHover)));
-  var _pinnedRef=(0,D.useRef)(!!(_initUi&&_initUi.pinnedByHover));
-  var _seqRef=(0,D.useRef)(0);
-  var _tempTailRef=(0,D.useRef)(new Map());
-  var _failedRef=(0,D.useRef)(new Map());
-  var _tailTrackRef=(0,D.useRef)({prefix:"",ts:0,sentKey:""});
-  var _debounceRef=(0,D.useRef)(null);
-  var _tailTimerRef=(0,D.useRef)(null);
-  var _holdCloseRef=(0,D.useRef)(null);
-  var _holdHardCapRef=(0,D.useRef)(null);
+  var [_exp,_setExp]=(0,${_TR}.useState)(_m||_initHold);
+  var [_holdActive,_setHoldActive]=(0,${_TR}.useState)(_initHold);
+  var [_locked,_setLocked]=(0,${_TR}.useState)(_initLocked);
+  var [_showOrig,_setShowOrig]=(0,${_TR}.useState)(!!(_initUi&&_initUi.showOrig));
+  var [_tick,_setTick]=(0,${_TR}.useState)(0);
+  var [_translating,_setTranslating]=(0,${_TR}.useState)(!1);
+  var _wrapRef=(0,${_TR}.useRef)(null);
+  var _prevMRef=(0,${_TR}.useRef)(_m);
+  var _wasActiveRef=(0,${_TR}.useRef)(_m||!!(_initUi&&_initUi.wasActive));
+  var _firstWaveSentRef=(0,${_TR}.useRef)(!!(_initUi&&_initUi.firstWaveSent));
+  var _lockedRef=(0,${_TR}.useRef)(_initLocked);
+  var _hoveredRef=(0,${_TR}.useRef)(!!(_initUi&&(_initUi.hovered||_initUi.pinnedByHover)));
+  var _pinnedRef=(0,${_TR}.useRef)(!!(_initUi&&_initUi.pinnedByHover));
+  var _seqRef=(0,${_TR}.useRef)(0);
+  var _tempTailRef=(0,${_TR}.useRef)(new Map());
+  var _failedRef=(0,${_TR}.useRef)(new Map());
+  var _tailTrackRef=(0,${_TR}.useRef)({prefix:"",ts:0,sentKey:""});
+  var _debounceRef=(0,${_TR}.useRef)(null);
+  var _tailTimerRef=(0,${_TR}.useRef)(null);
+  var _holdCloseRef=(0,${_TR}.useRef)(null);
+  var _holdHardCapRef=(0,${_TR}.useRef)(null);
   var _syncUi=function(_patch){
     try{
       var _e=typeof window!=="undefined"?window.__agyThoughtEngine:null;
@@ -680,11 +794,11 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
       _syncUi({hovered:!0});
       return;
     }
-    if(_exp||m||_holdActive){
+    if(_exp||_m||_holdActive){
       _pinnedRef.current=!0;
       _clearHoldTimers();
       _syncUi({hovered:!0,pinnedByHover:!0,manualClosed:!1,graceUntil:0});
-      if(!m&&!_holdActive)_setHoldActive(!0);
+      if(!_m&&!_holdActive)_setHoldActive(!0);
       if(!_exp)_setExp(!0);
     }else{
       _syncUi({hovered:!0});
@@ -692,7 +806,6 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
   };
   var _leaveHover=function(_ev,_fromPointerMove){
     if(_lockedRef.current){
-      // 上锁状态：停用鼠标离开自动折叠，仅清除瞬时悬停标记
       _hoveredRef.current=!1;
       _pinnedRef.current=!1;
       _syncUi({hovered:!1,pinnedByHover:!1});
@@ -706,47 +819,43 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
       }
       var _engPtr=typeof window!=="undefined"?window.__agyThoughtEngine:null;
       var _lp=_engPtr&&_engPtr.getLastPointer?_engPtr.getLastPointer():null;
-      // 被动滚动/后续步骤推高布局导致的假性 mouseleave（鼠标超 220ms 未主动移动）：免疫打断，保持展开直到用户真实移走鼠标
       if(_pinnedRef.current&&_lp&&_lp.ts>0&&(Date.now()-_lp.ts)>220)return;
     }
     _hoveredRef.current=!1;
     var _wasPinned=_pinnedRef.current;
     _pinnedRef.current=!1;
     _syncUi({hovered:!1,pinnedByHover:!1});
-    if(m){
+    if(_m){
       _clearHoldTimers();
       if(_holdActive)_setHoldActive(!1);
     }else if(_wasPinned||_holdActive||_exp){
       _scheduleGraceCollapse(350,!0);
     }
   };
-  (0,D.useEffect)(()=>{
-    if(m){
+  (0,${_TR}.useEffect)(()=>{
+    if(_m){
       _wasActiveRef.current=!0;
       _syncUi({wasActive:!0,manualClosed:!1,graceDone:!1});
     }
-    if(_prevMRef.current!==m){
+    if(_prevMRef.current!==_m){
       var _wasM=_prevMRef.current;
-      _prevMRef.current=m;
-      if(m){
+      _prevMRef.current=_m;
+      if(_m){
         _clearHoldTimers();
         if(!_pinnedRef.current&&!_lockedRef.current)_setHoldActive(!1);
         _setExp(!0);
       }else if(_lockedRef.current){
-        // 上锁状态：思考结束绝不自动收起
         _clearHoldTimers();
         _syncUi({locked:!0,manualClosed:!1,graceUntil:0});
         _setHoldActive(!0);
         _setExp(!0);
       }else if(_hoveredRef.current||_pinnedRef.current){
-        // 鼠标正悬停在思考块上：无论中英文、无论是否出现后续步骤，绝对保持展开不收起
         _clearHoldTimers();
         _pinnedRef.current=!0;
         _syncUi({hovered:!0,pinnedByHover:!0,manualClosed:!1,graceUntil:0});
         _setHoldActive(!0);
         _setExp(!0);
       }else if(_wasM&&_wasActiveRef.current&&!_showOrig){
-        // 思考刚结束且鼠标未悬停：若含英文待译/刚译内容，进入 1.5s 短链防秒收起保持期
         var _needHold=!1;
         try{
           var _hEng=typeof window!=="undefined"?window.__agyThoughtEngine:null;
@@ -774,11 +883,10 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
         _collapseNow(!1);
       }
     }
-  },[m,_showOrig,a]);
-  // 跨重挂载与离开区域精确追踪：仅在未上锁且鼠标真正主动移出思考块区域后才自动收起，免疫后续步骤推高滚动条打断
-  (0,D.useEffect)(()=>{
-    if(!_holdActive&&!(m&&_exp))return;
-    if(!m&&_holdActive&&!_lockedRef.current){
+  },[_m,_showOrig,a]);
+  (0,${_TR}.useEffect)(()=>{
+    if(!_holdActive&&!(_m&&_exp))return;
+    if(!_m&&_holdActive&&!_lockedRef.current){
       var _u=_engBoot?_engBoot.getStepUiState(_stepKey):null;
       if(!_pinnedRef.current&&_u&&_u.graceUntil&&_u.graceUntil>Date.now()){
         var _rem=Math.max(300,_u.graceUntil-Date.now());
@@ -812,19 +920,19 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
     return function(){
       window.removeEventListener("pointermove",_onPointerMove);
     };
-  },[m,_exp,_holdActive,_locked,_translating,_stepKey]);
-  (0,D.useEffect)(()=>{return function(){_clearHoldTimers();};},[]);
-  (0,D.useEffect)(()=>{
+  },[_m,_exp,_holdActive,_locked,_translating,_stepKey]);
+  (0,${_TR}.useEffect)(()=>{return function(){_clearHoldTimers();};},[]);
+  (0,${_TR}.useEffect)(()=>{
     var _alive=!0;
     var _cleanup=()=>{
       if(_debounceRef.current){clearTimeout(_debounceRef.current);_debounceRef.current=null;}
       if(_tailTimerRef.current){clearTimeout(_tailTimerRef.current);_tailTimerRef.current=null;}
     };
     try{
-      if(!a||!k||!(_exp||_holdActive)||_showOrig)return _cleanup;
+      if(!a||!_k||!(_exp||_holdActive)||_showOrig)return _cleanup;
       var _eng=typeof window!=="undefined"?window.__agyThoughtEngine:null;
       if(!_eng)return _cleanup;
-      var _parts=_eng.splitThoughtSegments(a,m);
+      var _parts=_eng.splitThoughtSegments(a,_m);
       var _needCommitted=[];
       var _seenBatch=new Set();
       var _tailPart=null;
@@ -871,23 +979,21 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
           }catch(_e){}finally{
             if(_alive&&_mySeq===_seqRef.current){
               _setTranslating(!1);
-              if(!m&&_holdActive&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current)_scheduleGraceCollapse(1500,!1);
+              if(!_m&&_holdActive&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current)_scheduleGraceCollapse(1500,!1);
             }
           }
         };
-        // 首波 0ms 立即发车（零防抖），或思考已结束立即发车；后续增量波次 200ms 防抖合并
-        if(!m||!_firstWaveSentRef.current){
+        if(!_m||!_firstWaveSentRef.current){
           _runCommitted();
         }else{
           _debounceRef.current=setTimeout(_runCommitted,200);
         }
-      }else if(m&&_tailPart){
+      }else if(_m&&_tailPart){
         var _tPrefix=_tailPart.norm.slice(0,24);
         var _now=Date.now();
         if(_tailTrackRef.current.prefix!==_tPrefix){
           _tailTrackRef.current={prefix:_tPrefix,ts:_now,sentKey:""};
         }
-        // 首屏尚未出中文且尾句 >= 45 字时 350ms 提前预译；其余长尾句 >= 140 字且超 1500ms 预译（均不入盘）
         var _tailMinLen=_hasAnyZh?140:45;
         var _tailDelayMs=_hasAnyZh?1500:350;
         if(_tailPart.norm.length>=_tailMinLen&&_tailTrackRef.current.sentKey!==_tailPart.key&&!_tempTailRef.current.has(_tailPart.key)){
@@ -908,8 +1014,7 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
             }catch(_te){}
           },_wait);
         }
-      }else if(!m&&_holdActive&&!_translating&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current){
-        // 思考已结束且译文已全部就绪（未上锁、未悬停）：保留约 1.5 秒供自然阅读后再优雅收起
+      }else if(!_m&&_holdActive&&!_translating&&!_lockedRef.current&&!_hoveredRef.current&&!_pinnedRef.current){
         _scheduleGraceCollapse(1500,!1);
       }
     }catch(_err){}
@@ -917,14 +1022,14 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
       _alive=!1;
       _cleanup();
     };
-  },[a,k,m,_exp,_holdActive,_showOrig,_tick]);
+  },[a,_k,_m,_exp,_holdActive,_showOrig,_tick]);
   if(!a)return null;
-  if(!k)return m?D.createElement("div",{className:"flex w-full items-center gap-1.5 px-2 min-h-8 text-left rounded-lg text-muted-foreground tabular-nums select-none"},D.createElement(uY,null,D.createElement(hAc,{metadata:c}))):null;
+  if(!_k)return _m?${_TR}.createElement("div",{className:"flex w-full items-center gap-1.5 px-2 min-h-8 text-left rounded-lg text-muted-foreground tabular-nums select-none"},${_TR}.createElement(${_TSHIM},null,${_TR}.createElement(${_THEAD},{metadata:c}))):null;
   var _rendered=a,_hasEn=!1,_isWaitingFirstZh=!1,_hasPendingZh=!1;
   try{
     var _engRender=typeof window!=="undefined"?window.__agyThoughtEngine:null;
     if(_engRender){
-      var _rParts=_engRender.splitThoughtSegments(a,m);
+      var _rParts=_engRender.splitThoughtSegments(a,_m);
       for(var _ri=0;_ri<_rParts.length;_ri++){
         if(_rParts[_ri].kind==="sent"&&_rParts[_ri].translatable){_hasEn=!0;break;}
       }
@@ -940,7 +1045,7 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
       }
     }
   }catch(_re){_rendered=a;}
-  var p=b?\`思考了 \${Math.max(1,Number(b.seconds))} 秒\`:"思考过程";
+  var _p=b?\`思考了 \${Math.max(1,Number(b.seconds))} 秒\`:"思考过程";
   var _toggleLock=function(_ev){
     _ev.stopPropagation();
     var _next=!_lockedRef.current;
@@ -949,31 +1054,31 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
     if(_next){
       _clearHoldTimers();
       _syncUi({locked:!0,manualClosed:!1,graceDone:!1,graceUntil:0});
-      if(!m&&!_holdActive)_setHoldActive(!0);
+      if(!_m&&!_holdActive)_setHoldActive(!0);
       if(!_exp)_setExp(!0);
     }else{
       _hoveredRef.current=!0;
       _pinnedRef.current=!0;
       _syncUi({locked:!1,hovered:!0,pinnedByHover:!0});
-      if(!m&&!_holdActive)_setHoldActive(!0);
+      if(!_m&&!_holdActive)_setHoldActive(!0);
     }
   };
-  var _renderBody=(q,t)=>{
-    var _content=q===a?_rendered:q;
+  var _renderBody=(_q,_t)=>{
+    var _content=_q===a?_rendered:_q;
     var _showBusy=_hasEn&&(_translating||_hasPendingZh)&&!_showOrig;
     var _lockIcon=_locked
-      ? D.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
-          D.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
-          D.createElement("path",{d:"M7 11V7a5 5 0 0 1 10 0v4"})
+      ? ${_TR}.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
+          ${_TR}.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
+          ${_TR}.createElement("path",{d:"M7 11V7a5 5 0 0 1 10 0v4"})
         )
-      : D.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
-          D.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
-          D.createElement("path",{d:"M7 11V7a5 5 0 0 1 9.9-1"})
+      : ${_TR}.createElement("svg",{width:13,height:13,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round"},
+          ${_TR}.createElement("rect",{x:3,y:11,width:18,height:11,rx:2,ry:2}),
+          ${_TR}.createElement("path",{d:"M7 11V7a5 5 0 0 1 9.9-1"})
         );
-    return D.createElement("div",{className:"cursor-edit group relative text-secondary-foreground pl-2"},
-      D.createElement("div",{className:"flex items-center justify-end gap-1.5 pb-1 pr-1 text-[11px] text-muted-foreground/75 select-none"},
-        _showBusy&&D.createElement("span",{className:"animate-pulse"},_isWaitingFirstZh?"正在同步中文思考…":"实时译文中…"),
-        D.createElement("button",{
+    return ${_TR}.createElement("div",{className:"cursor-edit group relative text-secondary-foreground pl-2"},
+      ${_TR}.createElement("div",{className:"flex items-center justify-end gap-1.5 pb-1 pr-1 text-[11px] text-muted-foreground/75 select-none"},
+        _showBusy&&${_TR}.createElement("span",{className:"animate-pulse"},_isWaitingFirstZh?"正在同步中文思考…":"实时译文中…"),
+        ${_TR}.createElement("button",{
           type:"button",
           "data-testid":"thought-collapse-lock",
           "aria-pressed":_locked,
@@ -982,7 +1087,7 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
           style:_locked?{color:"#f59e0b",backgroundColor:"rgba(245,158,11,0.14)"}:void 0,
           onClick:_toggleLock
         },_lockIcon),
-        _hasEn&&D.createElement("button",{
+        _hasEn&&${_TR}.createElement("button",{
           type:"button",
           "data-testid":"thought-lang-toggle",
           className:"px-1.5 py-0.5 rounded hover:bg-muted/60 hover:text-foreground transition-colors cursor-pointer",
@@ -997,18 +1102,18 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
         },_showOrig?"查看译文":"查看原文")
       ),
       _isWaitingFirstZh&&!_showOrig
-        ? D.createElement("div",{className:"py-1 text-sm text-muted-foreground/80 animate-pulse select-none"},"正在同步中文思考过程…")
-        : D.createElement(g,{animate:t&&m},_content)
+        ? ${_TR}.createElement("div",{className:"py-1 text-sm text-muted-foreground/80 animate-pulse select-none"},"正在同步中文思考过程…")
+        : ${_TR}.createElement(_md,{animate:_t&&_m},_content)
     );
   };
-  var _effectiveActive=m||_holdActive;
-  return D.createElement("div",{
+  var _effectiveActive=_m||_holdActive;
+  return ${_TR}.createElement("div",{
     ref:_wrapRef,
     "data-agy-thought-wrap":"1",
     onMouseEnter:_enterHover,
     onMouseLeave:function(_ev){_leaveHover(_ev,!1);}
-  },D.createElement(n2,{
-    trigger:q=>D.createElement(uY,{active:m,className:"text-muted-foreground"},m||_n?D.createElement(hAc,{metadata:c,doneText:m?void 0:p,animate:!q}):p),
+  },${_TR}.createElement(${_TCOL},{
+    trigger:_q=>${_TR}.createElement(${_TSHIM},{active:_m,className:"text-muted-foreground"},_m||_n?${_TR}.createElement(${_THEAD},{metadata:c,doneText:_m?void 0:_p,animate:!_q}):_p),
     defaultExpanded:_effectiveActive,
     isActive:_effectiveActive,
     dataTestId:"thinking-collapsible-trigger",
@@ -1027,64 +1132,86 @@ const newIac = `var iAc=({thinking:a,thinkingDuration:b,metadata:c,status:d,step
     maxHeight:200,
     autoScroll:!0,
     smoothScroll:!1
-  },_steerBtn&&D.createElement(_steerBtn,{metadata:c,isRunning:l}),_steerEd?D.createElement(_steerEd,{metadata:c,thinking:a,isRunning:l},_renderBody):_renderBody(a,l)));
+  },_steerBtn&&${_TR}.createElement(_steerBtn,{metadata:c,isRunning:_l}),_steerEd?${_TR}.createElement(_steerEd,{metadata:c,thinking:a,isRunning:_l},_renderBody):_renderBody(a,_l)));
 };`;
-code = code.replace(oldIac, newIac);
-console.log('✔ [锚点 8/12] 已重构 iAc 思维链实时流式翻译与增量锁定引擎');
-
-// 2.4.6 核心注入：Markdown 表格智能权重自适应布局引擎 (ckc / dkc / lkc / mkc / inline-pill-wrap)
-const ckcStartMarker = 'function ckc(a){var b=a.querySelector(":scope > table");';
-const dkcStartMarker = 'function dkc(a,b){var c=new Map;';
-const ekcStartMarker = 'function ekc(a,b){';
-const lkcStartMarker = 'function lkc({node:a,staggerStyle:b,...c}){';
-const mkcStartMarker = 'function mkc({widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d}){';
-const nkcStartMarker = 'var nkc=({src:a,alt:b,originalFilePath:c';
-
-const ckcIdx = code.indexOf(ckcStartMarker);
-const dkcIdx = ckcIdx !== -1 ? code.indexOf(dkcStartMarker, ckcIdx) : -1;
-const ekcIdx = dkcIdx !== -1 ? code.indexOf(ekcStartMarker, dkcIdx) : -1;
-if (ckcIdx === -1 || dkcIdx === -1 || ekcIdx === -1) {
-  throw new Error('❌ 未找到 Markdown 表格列宽测量/分配锚点 (ckc/dkc/ekc)，终止编译！');
+  code = code.slice(0, thoughtLoc.startIdx) + newThoughtComp + code.slice(thoughtLoc.endIdx);
+  console.log(`✔ [锚点 8/12] 已抗混淆重构 ${thoughtLoc.compName} 思维链实时流式翻译与悬停小锁引擎 (React=${_TR}, collapse=${_TCOL})`);
+  moduleStatus.thoughtStream = { enabled: true, compName: thoughtLoc.compName };
+  activeOutputMarkers.push(
+    '__agyThoughtEngine',
+    '/translate-thought',
+    'thought-lang-toggle',
+    'thought-collapse-lock',
+    'data-agy-thought-wrap',
+    'getStepUiState',
+    'getLastPointer',
+    '正在同步中文思考过程…',
+    'defaultExpanded:_effectiveActive',
+    '思考了 '
+  );
+} else if (STRICT_MODE) {
+  throw new Error(`❌ 思维链渲染组件锚点或内部符号缺失: ${thoughtLoc.reason}`);
+} else {
+  moduleStatus.thoughtStream = { enabled: false, reason: thoughtLoc.reason };
+  recordSkipped('思维链实时流式翻译与悬停小锁 (iAc/rTc)', thoughtLoc.reason);
 }
 
-const oldCkcDkc = code.slice(ckcIdx, ekcIdx);
-const newCkcDkc = `function ckc(a){
-  var b=a.querySelector(":scope > table");
-  if(!b)return[];
+// 2.4.6 模块 C：全抗混淆 Markdown 表格智能权重自适应布局引擎（兼容 ckc-mkc / Crc-Mrc 及任意混淆名，全部局部变量加 _ 前缀零遮蔽）
+const tableLoc = locateTableModule(code);
+if (tableLoc.matched) {
+  const _MR = tableLoc.reactVar;
+  const _MEAS = tableLoc.measureFn;
+  const _ALLOC = tableLoc.allocFn;
+  const _EQ = tableLoc.eqFn;
+  const _BLEED = tableLoc.bleedFn;
+  const _CN = tableLoc.cnFn;
+  const _TOMD = tableLoc.toMdFn;
+  const _MASK = tableLoc.maskFn;
+  const _COPY = tableLoc.copyHook;
+  const _MROOT = tableLoc.menuRoot;
+  const _MTRIG = tableLoc.menuTrigger;
+  const _MBTN = tableLoc.btnComp;
+  const _MICON = tableLoc.iconComp;
+  const _MCONT = tableLoc.menuContent;
+  const _MITEM = tableLoc.menuItem;
+
+  const newMeasureAlloc = `function ${_MEAS}(a){
+  var _b=a.querySelector(":scope > table");
+  if(!_b)return[];
   a.setAttribute("data-agy-measuring","1");
-  var c=Array.from(b.rows),d=Math.max(0,...c.map(m=>m.cells.length));
-  c=c.flatMap(m=>Array.from(m.cells).flatMap(n=>n.firstElementChild instanceof HTMLElement&&n.firstElementChild.tagName==="DIV"?[n.firstElementChild]:[]));
-  var f=c.map(m=>m.style.cssText),g=a.style.cssText,h=b.style.cssText;
-  var k=Array(d).fill(0),l=Array(d).fill(0);
+  var _c=Array.from(_b.rows),_d=Math.max(0,..._c.map(_m=>_m.cells.length));
+  _c=_c.flatMap(_m=>Array.from(_m.cells).flatMap(_n=>_n.firstElementChild instanceof HTMLElement&&_n.firstElementChild.tagName==="DIV"?[_n.firstElementChild]:[]));
+  var _f=_c.map(_m=>_m.style.cssText),_g=a.style.cssText,_h=_b.style.cssText;
+  var _k=Array(_d).fill(0),_l=Array(_d).fill(0);
   try{
     a.style.height=a.getBoundingClientRect().height+"px";
     a.style.width="max-content";
     a.style.maxWidth="none";
-    b.style.tableLayout="auto";
-    b.style.width="auto";
-    b.style.minWidth="0";
-    for(var _ci=0;_ci<c.length;_ci++){
-      c[_ci].style.display="inline-block";
-      c[_ci].style.width="max-content";
-      c[_ci].style.maxWidth="none";
-      c[_ci].style.minWidth="0";
+    _b.style.tableLayout="auto";
+    _b.style.width="auto";
+    _b.style.minWidth="0";
+    for(var _ci=0;_ci<_c.length;_ci++){
+      _c[_ci].style.display="inline-block";
+      _c[_ci].style.width="max-content";
+      _c[_ci].style.maxWidth="none";
+      _c[_ci].style.minWidth="0";
     }
-    for(let m of c){
-      let n=m.parentElement;
-      if(!n||n.cellIndex>=d)continue;
-      let p=n.cellIndex;
-      k[p]=Math.max(k[p],m.getBoundingClientRect().width);
-      l[p]=Math.max(l[p],n.getBoundingClientRect().width);
+    for(let _m of _c){
+      let _n=_m.parentElement;
+      if(!_n||_n.cellIndex>=_d)continue;
+      let _p=_n.cellIndex;
+      _k[_p]=Math.max(_k[_p],_m.getBoundingClientRect().width);
+      _l[_p]=Math.max(_l[_p],_n.getBoundingClientRect().width);
     }
   }finally{
-    c.forEach((m,n)=>{m.style.cssText=f[n]});
-    b.style.cssText=h;
-    a.style.cssText=g;
+    _c.forEach((_m,_n)=>{_m.style.cssText=_f[_n]});
+    _b.style.cssText=_h;
+    a.style.cssText=_g;
     a.removeAttribute("data-agy-measuring");
   }
-  return k.map((m,n)=>({natural:Math.ceil(m),chrome:Math.min(64,Math.ceil(Math.max(0,l[n]-m)))}));
+  return _k.map((_m,_n)=>({natural:Math.ceil(_m),chrome:Math.min(64,Math.ceil(Math.max(0,_l[_n]-_m)))}));
 }
-function dkc(a,b){
+function ${_ALLOC}(a,b){
   var _te=typeof window!=="undefined"?window.__agyTableEngine:null;
   var _map=new Map();
   if(!_te||!Array.isArray(a)||a.length===0||!(b>0))return _map;
@@ -1094,140 +1221,155 @@ function dkc(a,b){
   }
   return _map;
 }`;
-code = code.slice(0, ckcIdx) + newCkcDkc + code.slice(ekcIdx);
-console.log('✔ [锚点 9/12] 已升级 ckc 纯净列宽测量与 dkc 智能权重列宽分配器');
 
-const lkcIdx = code.indexOf(lkcStartMarker);
-const mkcIdx = lkcIdx !== -1 ? code.indexOf(mkcStartMarker, lkcIdx) : -1;
-const nkcIdx = mkcIdx !== -1 ? code.indexOf(nkcStartMarker, mkcIdx) : -1;
-if (lkcIdx === -1 || mkcIdx === -1 || nkcIdx === -1) {
-  throw new Error('❌ 未找到 Markdown 表格渲染/菜单组件锚点 (lkc/mkc/nkc)，终止编译！');
-}
-
-const newLkcMkc = `function lkc({node:a,staggerStyle:b,...c}){
-  var d=(0,D.useRef)(null),f=(0,D.useRef)(null),g=(0,D.useRef)(null),h=(0,D.useId)(),
-    [k,l]=(0,D.useState)(null),m=k??"column",
-    [n,p]=(0,D.useState)([]),
-    [q,t]=(0,D.useState)({q:0,parentW:0,capW:0}),
-    [w,x]=(0,D.useState)("none"),
-    y=(0,D.useCallback)(()=>{
-      var I=f.current;
-      if(I){
-        var K=getComputedStyle(I).direction==="rtl",
-          L=I.scrollWidth-I.clientWidth,
-          M=K?Math.abs(I.scrollLeft)<L-1:I.scrollLeft>1;
-        I=K?I.scrollLeft<-1:I.scrollLeft<L-1;
-        var N=M&&I?"both":M?"left":I?"right":"none";
-        x(Q=>Q===N?Q:N);
+  const newTableMenu = `function ${tableLoc.tableComp}({node:a,staggerStyle:b,...c}){
+  var _d=(0,${_MR}.useRef)(null),_f=(0,${_MR}.useRef)(null),_g=(0,${_MR}.useRef)(null),_h=(0,${_MR}.useId)(),
+    [_k,_l]=(0,${_MR}.useState)(null),_m=_k??"column",
+    [_n,_p]=(0,${_MR}.useState)([]),
+    [_q,_t]=(0,${_MR}.useState)({q:0,parentW:0,capW:0}),
+    [_w,_x]=(0,${_MR}.useState)("none"),
+    _y=(0,${_MR}.useCallback)(()=>{
+      var _I=_f.current;
+      if(_I){
+        var _K=getComputedStyle(_I).direction==="rtl",
+          _L=_I.scrollWidth-_I.clientWidth,
+          _M=_K?Math.abs(_I.scrollLeft)<_L-1:_I.scrollLeft>1;
+        _I=_K?_I.scrollLeft<-1:_I.scrollLeft<_L-1;
+        var _N=_M&&_I?"both":_M?"left":_I?"right":"none";
+        _x(_Q=>_Q===_N?_Q:_N);
       }
     },[]),
-    z=(0,D.useRef)([]),A=(0,D.useRef)({q:0,parentW:0,capW:0}),C=(0,D.useRef)(null),B=(0,D.useRef)(null),
-    E=(0,D.useCallback)(I=>{
-      var K=g.current,L=d.current;
-      if(K){
-        var M=fkc(L),N=L?getComputedStyle(L).maxWidth:"";
-        N=N.endsWith("px")?parseFloat(N):0;
-        var _pW=L?.parentElement?.clientWidth||0;
-        var _mSt=M?getComputedStyle(M):null;
-        var _mIn=M?Math.max(0,M.clientWidth-(parseFloat(_mSt?.paddingLeft||0)||0)-(parseFloat(_mSt?.paddingRight||0)||0)):0;
-        var _cap=L&&M&&M.clientWidth>0?(N>0&&_mIn>0?Math.min(N,_mIn):(N||_mIn||_pW||L.clientWidth||f.current?.clientWidth||0)):(_pW||L?.clientWidth||f.current?.clientWidth||0);
-        var Q=_cap||_pW||L?.clientWidth||f.current?.clientWidth||0;
-        var O=[_pW,M?.clientWidth,_cap].join(" "),P=C.current!==null&&C.current!==O;
-        C.current=O;
-        var _curCols=z.current,R=!_curCols.some(S=>S.natural>0);
-        var _nextDim={q:Q,parentW:_pW,capW:_cap};
-        var _dimChanged=!A.current||Math.abs(_nextDim.q-A.current.q)>=1||Math.abs(_nextDim.parentW-A.current.parentW)>=1||Math.abs(_nextDim.capW-A.current.capW)>=1;
-        if(I==="always"||R||(I==="if-content-resized"&&!P)){
-          var _measured=ckc(K);
-          if(!ekc(_curCols,_measured)){_curCols=_measured;z.current=_curCols;p(_curCols);}
-          if(_dimChanged){A.current=_nextDim;t(_nextDim);}
+    _z=(0,${_MR}.useRef)([]),_A=(0,${_MR}.useRef)({q:0,parentW:0,capW:0}),_C=(0,${_MR}.useRef)(null),_B=(0,${_MR}.useRef)(null),
+    _E=(0,${_MR}.useCallback)(_I=>{
+      var _K=_g.current,_L=_d.current;
+      if(_K){
+        var _M=${_BLEED}(_L),_N=_L?getComputedStyle(_L).maxWidth:"";
+        _N=_N.endsWith("px")?parseFloat(_N):0;
+        var _pW=_L?.parentElement?.clientWidth||0;
+        var _mSt=_M?getComputedStyle(_M):null;
+        var _mIn=_M?Math.max(0,_M.clientWidth-(parseFloat(_mSt?.paddingLeft||0)||0)-(parseFloat(_mSt?.paddingRight||0)||0)):0;
+        var _cap=_L&&_M&&_M.clientWidth>0?(_N>0&&_mIn>0?Math.min(_N,_mIn):(_N||_mIn||_pW||_L.clientWidth||_f.current?.clientWidth||0)):(_pW||_L?.clientWidth||_f.current?.clientWidth||0);
+        var _Q=_cap||_pW||_L?.clientWidth||_f.current?.clientWidth||0;
+        var _O=[_pW,_M?.clientWidth,_cap].join(" "),_P=_C.current!==null&&_C.current!==_O;
+        _C.current=_O;
+        var _curCols=_z.current,_R=!_curCols.some(_S=>_S.natural>0);
+        var _nextDim={q:_Q,parentW:_pW,capW:_cap};
+        var _dimChanged=!_A.current||Math.abs(_nextDim.q-_A.current.q)>=1||Math.abs(_nextDim.parentW-_A.current.parentW)>=1||Math.abs(_nextDim.capW-_A.current.capW)>=1;
+        if(_I==="always"||_R||(_I==="if-content-resized"&&!_P)){
+          var _measured=${_MEAS}(_K);
+          if(!${_EQ}(_curCols,_measured)){_curCols=_measured;_z.current=_curCols;_p(_curCols);}
+          if(_dimChanged){_A.current=_nextDim;_t(_nextDim);}
         }else if(_dimChanged){
-          A.current=_nextDim;t(_nextDim);
+          _A.current=_nextDim;_t(_nextDim);
         }
-        y();
+        _y();
       }
-    },[y]);
-  (0,D.useLayoutEffect)(()=>{
-    var I=f.current,K=g.current,L=d.current;
-    if(I&&K){
-      var M=null,N=new ResizeObserver(S=>{
-        var Y=S.find(Z=>Z.target===K);
+    },[_y]);
+  (0,${_MR}.useLayoutEffect)(()=>{
+    var _I=_f.current,_K=_g.current,_L=_d.current;
+    if(_I&&_K){
+      var _M=null,_N=new ResizeObserver(_S=>{
+        var _Y=_S.find(_Z=>_Z.target===_K);
         var _contentResized=!1;
-        if(Y){
-          var _sig=Y.contentRect.width+" "+Y.contentRect.height;
-          _contentResized=M!==null&&M!==_sig;
-          M=_sig;
+        if(_Y){
+          var _sig=_Y.contentRect.width+" "+_Y.contentRect.height;
+          _contentResized=_M!==null&&_M!==_sig;
+          _M=_sig;
         }
-        E(_contentResized?"if-content-resized":"never");
+        _E(_contentResized?"if-content-resized":"never");
       });
-      N.observe(I);
-      N.observe(K);
-      if(L&&L.parentElement)N.observe(L.parentElement);
-      var _bleed=fkc(L);
-      if(_bleed)N.observe(_bleed);
-      var Q=new MutationObserver(()=>{E("always")});
-      Q.observe(K,{childList:!0,subtree:!0,characterData:!0});
-      B.current=Q;
-      var O=K.ownerDocument.fonts,P=!1,R=()=>{P||E("always")};
-      O?.addEventListener("loadingdone",R);
-      O?.status==="loading"&&O.ready.then(R);
-      return()=>{P=!0;N.disconnect();Q.disconnect();O?.removeEventListener("loadingdone",R);B.current=null};
+      _N.observe(_I);
+      _N.observe(_K);
+      if(_L&&_L.parentElement)_N.observe(_L.parentElement);
+      var _bleed=${_BLEED}(_L);
+      if(_bleed)_N.observe(_bleed);
+      var _Q=new MutationObserver(()=>{_E("always")});
+      _Q.observe(_K,{childList:!0,subtree:!0,characterData:!0});
+      _B.current=_Q;
+      var _O=_K.ownerDocument.fonts,_P=!1,_R=()=>{_P||_E("always")};
+      _O?.addEventListener("loadingdone",_R);
+      _O?.status==="loading"&&_O.ready.then(_R);
+      return()=>{_P=!0;_N.disconnect();_Q.disconnect();_O?.removeEventListener("loadingdone",_R);_B.current=null};
     }
-  },[E]);
-  (0,D.useLayoutEffect)(()=>{E("always");B.current?.takeRecords()},[E,c.children]);
-  (0,D.useLayoutEffect)(()=>{y()},[n,m,q,y]);
+  },[_E]);
+  (0,${_MR}.useLayoutEffect)(()=>{_E("always");_B.current?.takeRecords()},[_E,c.children]);
+  (0,${_MR}.useLayoutEffect)(()=>{_y()},[_n,_m,_q,_y]);
   var _te=typeof window!=="undefined"?window.__agyTableEngine:null;
-  var _built=_te?_te.buildTableCss(h,n,q.q,m,{parentWidth:q.parentW,capWidth:q.capW}):{css:"",layout:{mode:"natural"},canExpand:!1};
-  a=_built.css;
-  var u=!_built.canExpand;
-  var H=w!=="none";
-  return D.createElement("div",{ref:d,"data-md-table-host":h,"data-agy-table-responsive":"1","data-agy-table-layout":_built.layout?.mode||"natural","data-width-mode":m,style:b,className:Wi("group/md-table relative my-4","md-table-host")},
-    a&&D.createElement("style",null,a),
-    D.createElement(mkc,{widthMode:m,disabled:m==="column"&&u,onWidthModeChange:l,getMarkdown:()=>g.current?ikc(g.current):""}),
-    D.createElement("div",{ref:f,onScroll:y,tabIndex:H?0:void 0,role:H?"region":void 0,"aria-label":H?"可横向滚动表格":void 0,style:kkc(w),className:Wi("w-full overflow-x-auto overflow-y-hidden",H&&"rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary","md-table-scroll")},
-      D.createElement("div",{ref:g,"data-md-table":h,className:Wi("agy-md-table relative w-fit min-w-full rounded-lg overflow-hidden border","md-table-frame")},
-        D.createElement("table",{...c,className:Wi("md-table-el min-w-full border-separate border-spacing-0",c.className)},c.children)
+  var _built=_te?_te.buildTableCss(_h,_n,_q.q,_m,{parentWidth:_q.parentW,capWidth:_q.capW}):{css:"",layout:{mode:"natural"},canExpand:!1};
+  var _css=_built.css;
+  var _u=!_built.canExpand;
+  var _H=_w!=="none";
+  return ${_MR}.createElement("div",{ref:_d,"data-md-table-host":_h,"data-agy-table-responsive":"1","data-agy-table-layout":_built.layout?.mode||"natural","data-width-mode":_m,style:b,className:${_CN}("group/md-table relative my-4","md-table-host")},
+    _css&&${_MR}.createElement("style",null,_css),
+    ${_MR}.createElement(${tableLoc.menuComp},{widthMode:_m,disabled:_m==="column"&&_u,onWidthModeChange:_l,getMarkdown:()=>_g.current?${_TOMD}(_g.current):""}),
+    ${_MR}.createElement("div",{ref:_f,onScroll:_y,tabIndex:_H?0:void 0,role:_H?"region":void 0,"aria-label":_H?"可横向滚动表格":void 0,style:${_MASK}(_w),className:${_CN}("w-full overflow-x-auto overflow-y-hidden",_H&&"rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary","md-table-scroll")},
+      ${_MR}.createElement("div",{ref:_g,"data-md-table":_h,className:${_CN}("agy-md-table relative w-fit min-w-full rounded-lg overflow-hidden border","md-table-frame")},
+        ${_MR}.createElement("table",{...c,className:${_CN}("md-table-el min-w-full border-separate border-spacing-0",c.className)},c.children)
       )
     )
   );
 }
-function mkc({widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d}){
-  var [f,g]=(0,D.useState)(!1),{copied:h,copy:k}=kY(),l=a==="column";
-  a=l?"展开全宽":"适应窗口";
-  var m=h?"已复制到剪贴板":"表格选项";
-  return D.createElement("div",{className:"pointer-events-none sticky top-0 z-[5] -mb-8 flex h-8 items-start justify-end px-2"},
-    D.createElement("div",{className:Wi("mt-2 transition-opacity",f||h?"opacity-100 pointer-events-auto":"pointer-events-auto can-hover:opacity-0 can-hover:pointer-events-none","group-hover/md-table:opacity-100 group-hover/md-table:pointer-events-auto group-focus-within/md-table:opacity-100 group-focus-within/md-table:pointer-events-auto")},
-      D.createElement(WW,{open:f,onOpenChange:g},
-        D.createElement(XW,{asChild:!0},
-          D.createElement(gH,{variant:"muted",size:"custom",className:"agy-pill h-6 w-6 rounded-md shadow-sm","aria-label":m,tooltip:m,"data-testid":"markdown-table-menu"},
-            D.createElement(Aw,{name:h?"check":"more_vert",size:14})
+function ${tableLoc.menuComp}({widthMode:a,disabled:b=!1,onWidthModeChange:c,getMarkdown:d}){
+  var [_f,_g]=(0,${_MR}.useState)(!1),{copied:_h,copy:_k}=${_COPY}(),_l=a==="column";
+  var _lbl=_l?"展开全宽":"适应窗口";
+  var _m=_h?"已复制到剪贴板":"表格选项";
+  return ${_MR}.createElement("div",{className:"pointer-events-none sticky top-0 z-[5] -mb-8 flex h-8 items-start justify-end px-2"},
+    ${_MR}.createElement("div",{className:${_CN}("mt-2 transition-opacity",_f||_h?"opacity-100 pointer-events-auto":"pointer-events-auto can-hover:opacity-0 can-hover:pointer-events-none","group-hover/md-table:opacity-100 group-hover/md-table:pointer-events-auto group-focus-within/md-table:opacity-100 group-focus-within/md-table:pointer-events-auto")},
+      ${_MR}.createElement(${_MROOT},{open:_f,onOpenChange:_g},
+        ${_MR}.createElement(${_MTRIG},{asChild:!0},
+          ${_MR}.createElement(${_MBTN},{variant:"muted",size:"custom",className:"agy-pill h-6 w-6 rounded-md shadow-sm","aria-label":_m,tooltip:_m,"data-testid":"markdown-table-menu"},
+            ${_MR}.createElement(${_MICON},{name:_h?"check":"more_vert",size:14})
           )
         ),
-        D.createElement(YW,{side:"bottom",align:"end",className:"min-w-[180px]"},
-          D.createElement(ZW,{onClick:()=>{k(d());g(!1)},"data-testid":"markdown-table-copy-markdown"},
-            D.createElement(Aw,{name:"content_copy",size:14,className:"mr-2"}),"复制为 Markdown"
+        ${_MR}.createElement(${_MCONT},{side:"bottom",align:"end",className:"min-w-[180px]"},
+          ${_MR}.createElement(${_MITEM},{onClick:()=>{_k(d());_g(!1)},"data-testid":"markdown-table-copy-markdown"},
+            ${_MR}.createElement(${_MICON},{name:"content_copy",size:14,className:"mr-2"}),"复制为 Markdown"
           ),
-          D.createElement(ZW,{disabled:b,onClick:()=>{b||(c(l?"full":"column"),g(!1))},"data-testid":"markdown-table-width-toggle"},
-            D.createElement(Aw,{name:l?"open_in_full":"close_fullscreen",size:14,className:"mr-2 rotate-45"}),a
+          ${_MR}.createElement(${_MITEM},{disabled:b,onClick:()=>{b||(c(_l?"full":"column"),_g(!1))},"data-testid":"markdown-table-width-toggle"},
+            ${_MR}.createElement(${_MICON},{name:_l?"open_in_full":"close_fullscreen",size:14,className:"mr-2 rotate-45"}),_lbl
           )
         )
       )
     )
   );
 };`;
-code = code.slice(0, lkcIdx) + newLkcMkc + code.slice(nkcIdx);
-console.log('✔ [锚点 10-11/12] 已重构 lkc 自适应表格容器与 mkc 中文操作菜单');
 
-const pillCssTarget = 'min-width: calc-size(max-content, min(size, 20ch));';
-if (!code.includes(pillCssTarget)) {
-  throw new Error('❌ 未找到表格文件胶囊 .inline-pill-wrap 的 20ch 最小宽锁死样式，终止编译！');
+  // 先替换后段 (tableStart..menuEnd)，再替换前段 (measureStart..eqStart)，确保索引严格准确
+  code = code.slice(0, tableLoc.tableStart) + newTableMenu + code.slice(tableLoc.menuEnd);
+  code = code.slice(0, tableLoc.measureStart) + newMeasureAlloc + code.slice(tableLoc.eqStart);
+  code = code.replace(tableLoc.pillCssTarget, 'min-width: 0;\\n  word-break: break-word;');
+  console.log(`✔ [锚点 9-12/12] 已抗混淆升级表格引擎 (${_MEAS}/${_ALLOC}/${tableLoc.tableComp}/${tableLoc.menuComp}, React=${_MR}) 并解除 20ch 胶囊锁死`);
+  moduleStatus.tableLayout = { enabled: true, tableComp: tableLoc.tableComp, menuComp: tableLoc.menuComp };
+  activeOutputMarkers.push(
+    '__agyTableEngine',
+    'computeColumnWidths',
+    'buildTableCss',
+    'data-agy-measuring',
+    'data-agy-table-responsive',
+    '展开全宽',
+    '适应窗口',
+    '复制为 Markdown',
+    '表格选项'
+  );
+} else if (STRICT_MODE) {
+  throw new Error(`❌ Markdown 表格自适应锚点或耦合符号缺失: ${tableLoc.reason}`);
+} else {
+  moduleStatus.tableLayout = { enabled: false, reason: tableLoc.reason };
+  recordSkipped('Markdown 表格自适应布局与菜单汉化 (ckc-mkc/Crc-Mrc)', tableLoc.reason);
 }
-code = code.replace(pillCssTarget, 'min-width: 0;\\n  word-break: break-word;');
-console.log('✔ [锚点 12/12] 已解除表格单元格文件胶囊 .inline-pill-wrap 的 20ch 最小宽锁死限制');
 
-// 2.5 终极注入：劫持设置元数据工厂 sT(a)
-const stHeader = 'function sT(a){';
-const stHook = `function sT(a){
+// 2.5 抗混淆终极注入：劫持设置元数据工厂 sT(a)（窄窗口动态捕获函数名、参数名、中间声明与单例名）
+const stStartRegex = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{((?:(?!;function )[\s\S]){0,420}?)return new Map\(\[\["useAICredits"/;
+const stStartMatch = findByAnchorRegex(code, 'return new Map([["useAICredits"', stStartRegex, 450, 20);
+if (stStartMatch) {
+  const [stStartFull, stFn, stArg, stPreDecls] = stStartMatch;
+  const stEndRegex = new RegExp(`settingType:"switch"\\}\\]\\]\\)\\}var ([A-Za-z_$][\\w$]*)=${stFn}\\(\\);`);
+  const stEndMatch = findByAnchorRegex(code.slice(stStartMatch.index), 'settingType:"switch"}]])}', stEndRegex, 10, 40);
+  if (stEndMatch) {
+    const stEndAbsIdx = stStartMatch.index + stEndMatch.index;
+    const stEndFull = stEndMatch[0];
+    const stInstVar = stEndMatch[1];
+    const stHook = `function ${stFn}(${stArg}){
   const _optMap = ${JSON.stringify(optionValues)};
   const _lblMap = ${JSON.stringify(rowLabels)};
   const _dscMap = ${JSON.stringify(rowDescriptions)};
@@ -1248,40 +1390,72 @@ const stHook = `function sT(a){
     });
     return m;
   }
-`;
-code = code.replace(stHeader, stHook);
+  ${stPreDecls}return _wrapMap(new Map([["useAICredits"`;
+    const stEndReplacement = `settingType:"switch"}]]))}` + `var ${stInstVar}=${stFn}();`;
+    // 先替换尾部再替换头部，确保偏移精准无漂移
+    code = code.slice(0, stEndAbsIdx) + stEndReplacement + code.slice(stEndAbsIdx + stEndFull.length);
+    code = code.slice(0, stStartMatch.index) + stHook + code.slice(stStartMatch.index + stStartFull.length);
+    moduleStatus.coreSettings.hits.push(`sT(${stFn})`);
+  } else {
+    moduleStatus.coreSettings.missing.push('sT_end');
+  }
+} else {
+  moduleStatus.coreSettings.missing.push('sT_head');
+}
 
-// 配对 wrap Map 的起始和闭合
-const stReturn = 'return new Map([["useAICredits"';
-code = code.replace(stReturn, 'return _wrapMap(new Map([["useAICredits"');
-const actualStEnd = 'settingType:"switch"}]])}var vKb=sT();';
-code = code.replace(actualStEnd, 'settingType:"switch"}]]))}' + 'var vKb=sT();');
+moduleStatus.coreSettings.enabled = moduleStatus.coreSettings.hits.length >= 2;
+if (!moduleStatus.coreSettings.enabled) {
+  throw new Error(`❌ 基础设置汉化核心层命中不足 (${moduleStatus.coreSettings.hits.length}/5)，中止编译以防大面积失效！缺失: ${moduleStatus.coreSettings.missing.join(', ')}`);
+}
 
-// 2.6 注入手写组件内的特定文本（Token 用量、Show breakdown、Demoted、Excluded 等）
+// 2.6 抗混淆注入手写组件内的特定文本（Token 用量、Show breakdown、Demoted、Excluded、Rules 等，零硬编码变量名）
 code = code.replace('The breakdown below shows token usage from customizations like rules, skills, and MCP. If a budget is exceeded, large rules are demoted to path pointers and large customizations are excluded automatically.',
   '下方图表展示了规则（Rules）、技能（Skills）及 MCP 扩展工具对上下文 Token 预算的占用情况。当超出配额上限时，大型规则会自动降级为文件路径指针，大型自定义项会被自动从上下文中排除。');
 
-code = code.replace('C?"Hide breakdown":`Show ${A.length} breakdown${A.length===1?"":"s"}`',
-  'C?"收起用量明细":`展开查看 ${A.length} 项明细`');
+const bdMatch = findByAnchorRegex(code, '?"Hide breakdown":`Show ${', /([A-Za-z_$][\w$]*)\?"Hide breakdown":`Show \$\{([A-Za-z_$][\w$]*)\.length\} breakdown\$\{\2\.length===1\?"":"s"\}`/, 20, 80);
+if (bdMatch) {
+  const bdRep = `${bdMatch[1]}?"收起用量明细":\`展开查看 \${${bdMatch[2]}.length} 项明细\``;
+  code = code.slice(0, bdMatch.index) + bdRep + code.slice(bdMatch.index + bdMatch[0].length);
+}
 
-code = code.replace('M?"Hide tools":`${N.length} tools`',
-  'M?"隐藏工具列表":`${N.length} 项工具`');
+const toolsMatch = findByAnchorRegex(code, '?"Hide tools":`${', /([A-Za-z_$][\w$]*)\?"Hide tools":`\$\{([A-Za-z_$][\w$]*)\.length\} tools`/, 20, 40);
+if (toolsMatch) {
+  const toolsRep = `${toolsMatch[1]}?"隐藏工具列表":\`\${${toolsMatch[2]}.length} 项工具\``;
+  code = code.slice(0, toolsMatch.index) + toolsRep + code.slice(toolsMatch.index + toolsMatch[0].length);
+}
 
-code = code.replace('Y="Demoted"', 'Y="降级为路径指针"');
-code = code.replace('Y="Excluded"', 'Y="超出预算已排除"');
+const demotedMatch = findByAnchorRegex(code, '="Demoted"', /([A-Za-z_$][\w$]*)="Demoted"/, 16, 16);
+if (demotedMatch) {
+  code = code.slice(0, demotedMatch.index) + `${demotedMatch[1]}="降级为路径指针"` + code.slice(demotedMatch.index + demotedMatch[0].length);
+}
+const excludedMatch = findByAnchorRegex(code, '="Excluded"', /([A-Za-z_$][\w$]*)="Excluded"/, 16, 16);
+if (excludedMatch) {
+  code = code.slice(0, excludedMatch.index) + `${excludedMatch[1]}="超出预算已排除"` + code.slice(excludedMatch.index + excludedMatch[0].length);
+}
 
-code = code.replace('D.createElement("span",{className:"font-medium text-secondary-foreground"},"Rules")',
-  'D.createElement("span",{className:"font-medium text-secondary-foreground"},"指令规则 (Rules)")');
+code = code.replace('createElement("span",{className:"font-medium text-secondary-foreground"},"Rules")',
+  'createElement("span",{className:"font-medium text-secondary-foreground"},"指令规则 (Rules)")');
 
 code = code.replace('a.length>0?"Other Customizations":"Customizations"',
   'a.length>0?"其他扩展与技能":"自定义扩展与技能"');
 
-// 2.7 浏览器页面手写组件（uPb）按钮与文本
-code = code.replace('D.createElement(Aw,{name:"arrow_back",size:16}),D.createElement("span",{className:"font-medium"},"Back"))',
-  'D.createElement(Aw,{name:"arrow_back",size:16}),D.createElement("span",{className:"font-medium"},"返回"))');
+// 2.7 浏览器页面手写组件按钮与文本（抗混淆兼容 D/E/Aw/sx 与 1.12.0 侧边栏描述）
+const backBtnMatch = findByAnchorRegex(
+  code,
+  'name:"arrow_back",size:16}),',
+  /name:"arrow_back",size:16\}\),([A-Za-z_$][\w$]*)\.createElement\("span",\{className:"font-medium"\},"Back"\)/,
+  10,
+  90
+);
+if (backBtnMatch) {
+  const backRep = `name:"arrow_back",size:16}),${backBtnMatch[1]}.createElement("span",{className:"font-medium"},"返回")`;
+  code = code.slice(0, backBtnMatch.index) + backRep + code.slice(backBtnMatch.index + backBtnMatch[0].length);
+}
 
 code = code.replace('"Clear visited URLs and autocomplete suggestions from the built-in browser."',
   '"清除内置浏览器的访问历史记录、Cookie 与搜索建议缓存。"');
+code = code.replace('"Clear visited URLs and autocomplete suggestions from side panel preview."',
+  '"清除侧边栏内置预览的访问历史记录、Cookie 与搜索建议缓存。"');
 
 code = code.replace('Clear browser history', '清除浏览记录');
 code = code.replace('>Reset<', '>重置<');
@@ -2073,44 +2247,38 @@ const tableEngineRuntimeScript = `
 
 code = runtimeTitleCacheInit + '\n' + thoughtEngineRuntimeScript + '\n' + tableEngineRuntimeScript + '\n' + domCleanerScript + '\n' + code;
 
-// 2.11 关键指纹断言（防止混淆锚点缺失导致静默失效）
-const requiredOutputMarkers = [
-  '__agyTitleAutoLocalizer',
-  'updateConversationAnnotations',
-  '/translate-title',
-  'ConversationAnnotationsSchema',
-  'label:XB({cascadeId:a.cascadeId,title:a.title,summary:a.title})',
-  'a=XB({cascadeId:f,annotations:a.annotations,summary:d||a.summary})',
-  'title:XB(g)||',
-  'g=XB(d)||',
-  '__agyThoughtEngine',
-  '/translate-thought',
-  'thought-lang-toggle',
-  'thought-collapse-lock',
-  'data-agy-thought-wrap',
-  'getStepUiState',
-  'getLastPointer',
-  '正在同步中文思考过程…',
-  'defaultExpanded:_effectiveActive',
-  '思考了 ',
-  '已思考 ',
-  '__agyTableEngine',
-  'computeColumnWidths',
-  'buildTableCss',
-  'data-agy-measuring',
-  'data-agy-table-responsive',
-  '展开全宽',
-  '适应窗口',
-  '复制为 Markdown',
-  '表格选项'
-];
-for (const marker of requiredOutputMarkers) {
+// 2.11 动态关键指纹断言 + 落盘前 V8 语法预检（零白屏护城河）
+const baseRequiredMarkers = ['Antigravity 全局自适应运行时 DOM 清洗引擎'];
+const allExpectedMarkers = [...baseRequiredMarkers, ...activeOutputMarkers];
+for (const marker of allExpectedMarkers) {
   if (!code.includes(marker)) {
     throw new Error('❌ 输出产物缺少关键指纹，中断写入: ' + marker);
   }
 }
 
-// 写入目标和备份
+try {
+  new vm.Script(code, { filename: 'hub_main_zh.js' });
+} catch (syntaxErr) {
+  throw new Error('❌ 产物 V8 语法预检未通过，已中止写入防止白屏: ' + syntaxErr.message);
+}
+
+// 原子写入目标、备份与模块状态报告
 fs.writeFileSync(dstPath, code, 'utf8');
 fs.writeFileSync(backupDst, code, 'utf8');
-console.log('✔ 已成功编译并部署全量终极中文与优化引擎（含标题持久化、思维链流式翻译与表格自适应）！大小:', code.length);
+const reportPayload = {
+  builtAt: new Date().toISOString(),
+  sourcePath: srcPath,
+  outputSize: code.length,
+  strictMode: STRICT_MODE,
+  modules: moduleStatus,
+  skippedModules
+};
+try {
+  fs.writeFileSync(path.join(agyExtDir, '.agy_build_report.json'), JSON.stringify(reportPayload, null, 2), 'utf8');
+} catch (_e) {}
+
+if (skippedModules.length > 0) {
+  console.warn(`⚠ 已完成韧性降级编译部署（跳过 ${skippedModules.length} 个不兼容增强模块: ${skippedModules.map(s => s.module).join('、')}）！大小: ${code.length}`);
+} else {
+  console.log('✔ 已成功编译并部署全量终极中文与优化引擎（含标题持久化、思维链流式翻译与表格自适应）！大小:', code.length);
+}
