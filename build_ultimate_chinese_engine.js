@@ -4,10 +4,12 @@ const vm = require('vm');
 const { getTargetPaths } = require('./src/config');
 const {
   findByAnchorRegex,
+  replaceAllByAnchorRegex,
   locateTitleRpcModule,
   locateThoughtModule,
   locateTableModule
 } = require('./src/core_injector');
+const { DOM_CLEANER_V2_MARKER, buildDomCleanerRuntimeScript } = require('./src/dom_cleaner');
 
 const { agyExtDir } = getTargetPaths();
 const localSrcPath = path.join(__dirname, 'hub_main.js');
@@ -1502,100 +1504,107 @@ for (const s of staticDict) {
   }
 }
 
-// 2.10 注入全局自适应 DOM 清洗监听器（兜底防线）
-const globalZhDictionary = {
+// 2.9.5 右侧边栏概览抽屉与新建标签页首帧抗混淆直译（零路由副作用，仅译显示文本，不改任何 id/sectionId/key）
+const overviewDirectPairs = [
+  // bld 客户端分区配置数组（保持 id 不变）
+  ['{id:"subagents",title:"Subagents"', '{id:"subagents",title:"子智能体"'],
+  ['{id:"sideQuestions",title:"Side Questions"', '{id:"sideQuestions",title:"侧边提问"'],
+  ['{id:"backgroundTasks",title:"Background Tasks"', '{id:"backgroundTasks",title:"后台任务"'],
+  ['{id:"goals",title:"Goals"', '{id:"goals",title:"目标"'],
+  ['{id:"documents",title:"Documents"', '{id:"documents",title:"文档"'],
+  ['{id:"artifacts",title:"Artifacts"', '{id:"artifacts",title:"产物文档"'],
+  ['{id:"links",title:"Links"', '{id:"links",title:"链接"'],
+  ['{id:"modifiedFiles",title:"Modified Files"', '{id:"modifiedFiles",title:"已修改文件"'],
+  ['{id:"uploads",title:"Uploads"', '{id:"uploads",title:"上传文件"'],
+  // omd 分区组件标题（保持 sectionId 不变）
+  ['sectionId:"subagents",title:"Subagents"', 'sectionId:"subagents",title:"子智能体"'],
+  ['sectionId:"sideQuestions",title:"Side Questions"', 'sectionId:"sideQuestions",title:"侧边提问"'],
+  ['sectionId:"backgroundTasks",title:"Background Tasks"', 'sectionId:"backgroundTasks",title:"后台任务"'],
+  ['sectionId:"goals",title:"Goals"', 'sectionId:"goals",title:"目标"'],
+  ['sectionId:"documents",title:"Documents"', 'sectionId:"documents",title:"文档"'],
+  ['sectionId:"artifacts",title:"Artifacts"', 'sectionId:"artifacts",title:"产物文档"'],
+  ['sectionId:"links",title:"Links"', 'sectionId:"links",title:"链接"'],
+  ['sectionId:"modifiedFiles",title:"Modified Files"', 'sectionId:"modifiedFiles",title:"已修改文件"'],
+  ['sectionId:"uploads",title:"Uploads"', 'sectionId:"uploads",title:"上传文件"'],
+  // Pull Requests 装饰分区（保持 persistentKey/id 不变）
+  ['overview:{header:"Pull Requests"', 'overview:{header:"拉取请求"'],
+  ['displayOption:{label:"Pull Requests"', 'displayOption:{label:"拉取请求"'],
+  // Customize Sections 触发器、Tooltip、菜单标题与空搜索提示
+  ['"aria-label":"Customize Sections"', '"aria-label":"自定义分区"'],
+  ['place:"top"},"Customize Sections")', 'place:"top"},"自定义分区")'],
+  [',null,"Customize Sections")', ',null,"自定义分区")'],
+  ['"aria-label":"Search for content to open"', '"aria-label":"搜索要打开的内容"'],
+  ['"text-muted-foreground px-3"},"No results")', '"text-muted-foreground px-3"},"无匹配结果")'],
+  // Side Question 右侧入口、标签头与提示
+  ['"Side Question: "', '"侧边提问："'],
+  ['"Side Question:"', '"侧边提问："'],
+  ['"New Side Question"', '"新建侧边提问"'],
+  ['"Delete Side Question"', '"删除侧边提问"'],
+  ['accessibilityLabel:"Side Question"', 'accessibilityLabel:"侧边提问"'],
+  ['"whitespace-nowrap"},"Side Question")', '"whitespace-nowrap"},"侧边提问")'],
+  ['"text-sm whitespace-nowrap"},"Side Question")', '"text-sm whitespace-nowrap"},"侧边提问")']
+];
+
+let overviewDirectHits = 0;
+for (const [fromStr, toStr] of overviewDirectPairs) {
+  let pos = 0;
+  while (true) {
+    const idx = code.indexOf(fromStr, pos);
+    if (idx === -1) break;
+    code = code.slice(0, idx) + toStr + code.slice(idx + fromStr.length);
+    pos = idx + toStr.length;
+    overviewDirectHits++;
+  }
+}
+
+// 抗混淆替换新建标签页搜索框动态占位符与 See all / See less 切换按钮
+const newTabPhRes = replaceAllByAnchorRegex(
+  code,
+  '"Search tabs, files and more"',
+  /placeholder:([A-Za-z_$][\w$]*)\?"Search or enter a URL":"Search tabs, files and more"/,
+  m => `placeholder:${m[1]}?"搜索或输入 URL":"搜索标签页、文件及更多内容"`,
+  30,
+  10
+);
+if (newTabPhRes.count > 0) {
+  code = newTabPhRes.code;
+  overviewDirectHits += newTabPhRes.count;
+}
+
+const seeAllRes = replaceAllByAnchorRegex(
+  code,
+  '?"See less":"See all"',
+  /([A-Za-z_$][\w$]*)\?"See less":"See all"/,
+  m => `${m[1]}?"收起":"查看全部"`,
+  16,
+  8
+);
+if (seeAllRes.count > 0) {
+  code = seeAllRes.code;
+  overviewDirectHits += seeAllRes.count;
+}
+
+if (overviewDirectHits > 0) {
+  console.log(`✔ [右侧边栏直译] 已首帧抗混淆汉化右侧概览抽屉与搜索面板 (${overviewDirectHits} 处)`);
+}
+
+// 2.10 注入全局自适应运行时 DOM 清洗引擎 v2（全 9 大功能域共享词库 + 动态模板 + 四重防误杀隔离 + 属性变更监听）
+const extraSettingsSafeDict = {
   ...screenTitles,
   ...utTitles,
   ...sectionTitles,
+  ...utDescriptions,
+  ...rowDescriptions,
   ...rowLabels,
   ...optionValues,
   ...actionWords,
   "Configure default behaviors, skills, and MCP servers.": "配置智能体默认行为、技能库及 MCP 外部工具服务器。",
   "Settings for conversations outside of projects.": "未归属具体项目的独立对话会话及全局自定义扩展配置。",
   "Configure built-in browser, link opening, and browser subagent preferences.": "配置内置浏览器运行环境、链接打开方式及浏览器子智能体偏好。",
-  "The breakdown below shows token usage from customizations like rules, skills, and MCP. If a budget is exceeded, large rules are demoted to path pointers and large customizations are excluded automatically.": "下方图表展示了规则（Rules）、技能（Skills）及 MCP 扩展工具对上下文 Token 预算的占用情况。当超出配额上限时，大型规则会自动降级为文件路径指针，大型自定义项会被自动从上下文中排除。",
-  "Search shortcuts": "搜索键盘快捷键",
-  "Search MCP servers by name": "按名称搜索 MCP 服务器",
-  "Clear search": "清空搜索内容",
-  "Add MCP Servers": "添加 MCP 服务器",
-  "Manage Hooks": "管理生命周期钩子",
-  "Build With Google Plugins": "Google 官方插件库",
-  "No quota information available.": "暂无可用配额信息。",
-  "Refresh quota and credits data": "刷新配额与积分数据",
-  "Enable AI Credit Overages": "启用 AI 积分超额自动扣费",
-  "Available AI Credits:": "可用 AI 积分：",
-  "See Activity": "查看用量明细",
-  "Get More AI Credits": "获取更多积分",
-  "Connecting to language server...": "正在连接语言服务器...",
-  "Loading workspace customizations...": "正在加载工作区自定义扩展...",
-  "There are no customizations enabled.": "当前未启用任何自定义扩展。",
-  "Ask anything, @ to mention, / for actions": "向 Antigravity 提问，输入 @ 提及，/ 执行操作",
-  "Rename": "重命名",
-  "Pin": "固定会话",
-  "Unpin": "取消固定",
-  "Archive": "归档会话",
-  "Split": "拆分视图",
-  "Copy": "复制",
-  "Settings": "打开设置"
+  "The breakdown below shows token usage from customizations like rules, skills, and MCP. If a budget is exceeded, large rules are demoted to path pointers and large customizations are excluded automatically.": "下方图表展示了规则（Rules）、技能（Skills）及 MCP 扩展工具对上下文 Token 预算的占用情况。当超出配额上限时，大型规则会自动降级为文件路径指针，大型自定义项会被自动从上下文中排除。"
 };
 
-const domCleanerScript = `
-// ==========================================
-// Antigravity 全局自适应运行时 DOM 清洗引擎
-// ==========================================
-(function() {
-  if (typeof window === 'undefined') return;
-  const zhMap = ${JSON.stringify(globalZhDictionary)};
-
-  function translateNode(node) {
-    if (!node) return;
-    if (node.nodeType === 3) {
-      const text = node.nodeValue ? node.nodeValue.trim() : '';
-      if (text && zhMap[text]) {
-        node.nodeValue = node.nodeValue.replace(text, zhMap[text]);
-      }
-    } else if (node.nodeType === 1) {
-      if (node.placeholder && zhMap[node.placeholder]) {
-        node.placeholder = zhMap[node.placeholder];
-      }
-      if (node.title && zhMap[node.title]) {
-        node.title = zhMap[node.title];
-      }
-      const aria = node.getAttribute('aria-label');
-      if (aria && zhMap[aria]) {
-        node.setAttribute('aria-label', zhMap[aria]);
-      }
-      for (let child of node.childNodes) {
-        translateNode(child);
-      }
-    }
-  }
-
-  const observer = new MutationObserver(mutations => {
-    for (const m of mutations) {
-      if (m.addedNodes) {
-        for (const n of m.addedNodes) translateNode(n);
-      }
-      if (m.type === 'characterData' && m.target) {
-        const text = m.target.nodeValue ? m.target.nodeValue.trim() : '';
-        if (text && zhMap[text]) {
-          m.target.nodeValue = m.target.nodeValue.replace(text, zhMap[text]);
-        }
-      }
-    }
-  });
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-      translateNode(document.body);
-    });
-  } else if (document.body) {
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    translateNode(document.body);
-  }
-})();
-`;
+const domCleanerScript = buildDomCleanerRuntimeScript(extraSettingsSafeDict);
 
 const runtimeTitleCacheInit = `
 (function() {
@@ -2248,7 +2257,7 @@ const tableEngineRuntimeScript = `
 code = runtimeTitleCacheInit + '\n' + thoughtEngineRuntimeScript + '\n' + tableEngineRuntimeScript + '\n' + domCleanerScript + '\n' + code;
 
 // 2.11 动态关键指纹断言 + 落盘前 V8 语法预检（零白屏护城河）
-const baseRequiredMarkers = ['Antigravity 全局自适应运行时 DOM 清洗引擎'];
+const baseRequiredMarkers = [DOM_CLEANER_V2_MARKER, 'window.__agyDomCleanerV2'];
 const allExpectedMarkers = [...baseRequiredMarkers, ...activeOutputMarkers];
 for (const marker of allExpectedMarkers) {
   if (!code.includes(marker)) {

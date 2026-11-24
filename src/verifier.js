@@ -13,8 +13,12 @@ const {
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
   HUB_ZH_TABLE_FEATURE_MARKERS,
+  HUB_ZH_FULL_UI_MARKERS,
   EXTENSION_HOOK_MARKER,
-  isAgyPackageLocalized,
+  EXTENSION_RUNTIME_MSG_MARKER,
+  checkAllBuiltInExtensionsLocalized,
+  checkBrowserOnboardingLocalized,
+  computeBuildEngineFingerprint,
   isWorkbenchPatched,
   isJetskiPatched,
   filesAreIdentical,
@@ -93,15 +97,26 @@ function runVerify() {
     }
   }
 
-  // 2. 检验扩展钩子与扩展命令汉化
+  // 2. 检验扩展钩子、原生弹窗、全部 5 个内置扩展清单与浏览器引导页
   assert('扩展 extension.js 文件存在', fs.existsSync(extJsPath));
   if (fs.existsSync(extJsPath)) {
     const extContent = fs.readFileSync(extJsPath, 'utf8');
     assert('extension.js 包含抗混淆 Webview 代理重定向钩子', extContent.includes(EXTENSION_HOOK_MARKER) && extContent.includes('hub_proxy'));
+    assert('extension.js 原生提示弹窗汉化生效', extContent.includes(EXTENSION_RUNTIME_MSG_MARKER));
   }
+  const extPkgReport = checkAllBuiltInExtensionsLocalized(appDir);
   assert(
-    '扩展 agy/package.json 命令标题汉化生效',
-    fs.existsSync(agyExtPackagePath) && isAgyPackageLocalized(fs.readFileSync(agyExtPackagePath, 'utf8'))
+    '5 个官方内置扩展 package.json 全量命令/视图/设置描述汉化生效',
+    extPkgReport.ok,
+    extPkgReport.ok
+      ? `(${extPkgReport.results.length} 个扩展，共 ${extPkgReport.localizedItems}/${extPkgReport.totalItems} 项)`
+      : `(未完成: ${extPkgReport.results.filter(r => !r.ok).map(r => `${r.extId} ${r.localized}/${r.total}`).join(', ')})`
+  );
+  const onboardingReport = checkBrowserOnboardingLocalized(appDir);
+  assert(
+    '内置浏览器欢迎页与引导页静态汉化生效',
+    onboardingReport.ok,
+    `(${onboardingReport.results.filter(r => r.ok).length}/${onboardingReport.results.length} 页)`
   );
 
   // 3. 检验代理与双翻译微服务（存在性 + 完整路由/热捕获特性 + 与源码模板一致）
@@ -141,7 +156,7 @@ function runVerify() {
   const meta = readDeployMeta(agyExtDir);
   const hubSourcePath = resolveHubSourcePath(agyExtDir, patchDir);
   const hubSourceSha = computeFileSha256(hubSourcePath);
-  const buildEngineSha = computeFileSha256(buildEnginePath);
+  const buildEngineSha = computeBuildEngineFingerprint(patchDir);
   assert(
     '部署元数据 .agy_zh_meta.json 完整就绪（含日志、缓存、Node 路径与 4 维版本指纹）',
     Boolean(
@@ -221,6 +236,15 @@ function runVerify() {
         ? `(${HUB_ZH_TABLE_FEATURE_MARKERS.length}/${HUB_ZH_TABLE_FEATURE_MARKERS.length})`
         : `(未生效/已降级，缺失: ${missingTableMarkers.join(', ')})`
     );
+    const missingFullUiMarkers = HUB_ZH_FULL_UI_MARKERS.filter(m => !zhContent.includes(m));
+    assert(
+      'Hub 前端全界面清洗引擎 v2 与右侧边栏首帧直译就绪',
+      missingFullUiMarkers.length === 0,
+      missingFullUiMarkers.length === 0
+        ? `(${HUB_ZH_FULL_UI_MARKERS.length}/${HUB_ZH_FULL_UI_MARKERS.length})`
+        : `(缺失: ${missingFullUiMarkers.join(', ')})`
+    );
+
     const skippedList = Array.isArray(meta?.skippedModules) ? meta.skippedModules : [];
     assert(
       '无任何降级跳过的增强模块（全功能满血生效）',
@@ -235,7 +259,7 @@ function runVerify() {
     fs.existsSync(wbPath) && isWorkbenchPatched(fs.readFileSync(wbPath, 'utf8'))
   );
   assert(
-    'jetskiAgent/main.js 会话标题与思考标签汉化注入生效',
+    'jetskiAgent/main.js 会话标题、思考标签与全界面清洗引擎 v2 注入生效',
     fs.existsSync(jetskiPath) && isJetskiPatched(fs.readFileSync(jetskiPath, 'utf8'))
   );
 

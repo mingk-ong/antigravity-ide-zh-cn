@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const {
   computeChecksum,
@@ -21,6 +22,15 @@ const {
 } = require('./config');
 const { agyCommandsMap } = require('./dictionary');
 const { loadCache } = require('./title_translator');
+const {
+  EXTENSION_MANIFEST_TRANSLATIONS,
+  EXTENSION_RUNTIME_MESSAGES,
+  BROWSER_ONBOARDING_TRANSLATIONS
+} = require('./ui_dictionary');
+const {
+  DOM_CLEANER_V2_MARKER,
+  buildDomCleanerRuntimeScript
+} = require('./dom_cleaner');
 
 // =========================================================================
 // 1. 全项目共享特征指纹常量与抗混淆正则（供自检、探针、审查共用）
@@ -80,6 +90,23 @@ const HUB_ZH_TABLE_FEATURE_MARKERS = [
   '复制为 Markdown',
   '表格选项'
 ];
+
+const HUB_ZH_FULL_UI_MARKERS = [
+  DOM_CLEANER_V2_MARKER,
+  'window.__agyDomCleanerV2',
+  '搜索标签页、文件及更多内容',
+  '自定义分区',
+  '已用技能',
+  '侧边提问',
+  '已修改文件',
+  '拉取请求'
+];
+
+const EXTENSION_RUNTIME_MSG_MARKER = 'Antigravity：登录成功';
+const BROWSER_ONBOARDING_MARKERS = {
+  'browserLanding.html': 'Antigravity 浏览器自动化控制',
+  'browserOnboarding.html': '浏览器集成配置'
+};
 
 // extension.js 抗混淆定位器：动态捕获 4 参数名并用 bridge.js 前瞻锁死目标方法，彻底免疫 Jv -> Zw 等内部函数改名
 const EXTENSION_HOOK_MARKER = 'redirectIframeUrl';
@@ -465,55 +492,260 @@ function locateExtensionWebviewHook(extCode) {
 }
 
 /**
- * 向 extension.js 动态注入 Webview 代理重定向钩子
+ * 向 extension.js 动态注入 Webview 代理重定向钩子，并精确汉化原生弹窗提示
  */
 function injectExtensionWebviewHook(extCode) {
   const loc = locateExtensionWebviewHook(extCode);
   if (!loc.matched) {
     return { ok: false, changed: false, code: extCode, reason: '未匹配到 renderWebviewHtml(..., bridge.js) 方法签名' };
   }
-  if (loc.alreadyHooked) {
-    return { ok: true, changed: false, code: extCode, alreadyHooked: true };
+  let code = extCode;
+  let changed = false;
+  let hookAdded = false;
+  if (!loc.alreadyHooked) {
+    const insertPos = loc.offset + loc.signature.length;
+    const injection = `try{${loc.urlArg}=require("../hub_proxy.js").redirectIframeUrl(${loc.urlArg})}catch(_e){}`;
+    code = code.slice(0, insertPos) + injection + code.slice(insertPos);
+    changed = true;
+    hookAdded = true;
   }
-  const insertPos = loc.offset + loc.signature.length;
-  const injection = `try{${loc.urlArg}=require("../hub_proxy.js").redirectIframeUrl(${loc.urlArg})}catch(_e){}`;
-  const patched = extCode.slice(0, insertPos) + injection + extCode.slice(insertPos);
-  return { ok: true, changed: true, code: patched, urlArg: loc.urlArg, offset: loc.offset };
+
+  let runtimeMsgHits = 0;
+  for (const [fromStr, toStr] of EXTENSION_RUNTIME_MESSAGES) {
+    if (code.includes(fromStr)) {
+      const parts = code.split(fromStr);
+      runtimeMsgHits += parts.length - 1;
+      code = parts.join(toStr);
+      changed = true;
+    }
+  }
+
+  return {
+    ok: true,
+    changed,
+    alreadyHooked: loc.alreadyHooked && !changed,
+    hookAdded,
+    runtimeMsgHits,
+    code,
+    urlArg: loc.urlArg,
+    offset: loc.offset
+  };
 }
 
-function isAgyPackageLocalized(pkgContent) {
-  try {
-    const pkg = JSON.parse(pkgContent);
-    if (!pkg.contributes || !Array.isArray(pkg.contributes.commands)) return true;
-    let totalMapped = 0;
-    let localizedCount = 0;
+function getConfigPropGroups(pkg) {
+  const cfg = pkg && pkg.contributes ? pkg.contributes.configuration : null;
+  if (!cfg) return [];
+  if (Array.isArray(cfg)) {
+    return cfg.map(c => (c && c.properties && typeof c.properties === 'object' ? c.properties : null)).filter(Boolean);
+  }
+  if (cfg.properties && typeof cfg.properties === 'object') return [cfg.properties];
+  return [];
+}
+
+/**
+ * 通用内置扩展 package.json 汉化器（按 command ID + title 双保险映射，同时覆盖子菜单、自定义编辑器、视图和设置描述）
+ */
+function localizeExtensionPackageObject(extId, pkg) {
+  const spec = EXTENSION_MANIFEST_TRANSLATIONS[extId];
+  if (!spec || !pkg || !pkg.contributes) return { modified: false, applied: 0 };
+  let applied = 0;
+
+  if (Array.isArray(pkg.contributes.commands)) {
     for (const cmd of pkg.contributes.commands) {
-      if (agyCommandsMap[cmd.command]) {
-        totalMapped++;
-        if (cmd.title === agyCommandsMap[cmd.command]) {
-          localizedCount++;
+      let zh = spec.commandsById && spec.commandsById[cmd.command];
+      if (!zh && extId === 'agy' && agyCommandsMap[cmd.title]) {
+        zh = agyCommandsMap[cmd.title];
+      }
+      if (zh && cmd.title !== zh) {
+        cmd.title = zh;
+        applied++;
+      }
+    }
+  }
+
+  if (spec.submenusById && Array.isArray(pkg.contributes.submenus)) {
+    for (const sm of pkg.contributes.submenus) {
+      const zh = spec.submenusById[sm.id];
+      if (zh && sm.label !== zh) {
+        sm.label = zh;
+        applied++;
+      }
+    }
+  }
+
+  if (spec.customEditorsByViewType && Array.isArray(pkg.contributes.customEditors)) {
+    for (const ed of pkg.contributes.customEditors) {
+      const zh = spec.customEditorsByViewType[ed.viewType];
+      if (zh && ed.displayName !== zh) {
+        ed.displayName = zh;
+        applied++;
+      }
+    }
+  }
+
+  if (spec.viewsById && pkg.contributes.views && typeof pkg.contributes.views === 'object') {
+    for (const list of Object.values(pkg.contributes.views)) {
+      if (!Array.isArray(list)) continue;
+      for (const v of list) {
+        const zh = spec.viewsById[v.id];
+        if (zh && v.name !== zh) {
+          v.name = zh;
+          applied++;
         }
       }
     }
-    return totalMapped === 0 || localizedCount === totalMapped;
+  }
+
+  if (spec.settingsByKey) {
+    for (const props of getConfigPropGroups(pkg)) {
+      for (const [key, patchFields] of Object.entries(spec.settingsByKey)) {
+        const prop = props[key];
+        if (!prop || typeof prop !== 'object') continue;
+        for (const field of ['description', 'markdownDeprecationMessage', 'deprecationMessage']) {
+          if (patchFields[field] && typeof prop[field] === 'string' && prop[field] !== patchFields[field]) {
+            prop[field] = patchFields[field];
+            applied++;
+          }
+        }
+      }
+    }
+  }
+
+  return { modified: applied > 0, applied };
+}
+
+/**
+ * 诚实核验单个扩展 package.json 的汉化覆盖状态（绝不允许 totalMapped === 0 蒙混通过）
+ */
+function inspectExtensionPackageLocalization(extId, pkgContent) {
+  const spec = EXTENSION_MANIFEST_TRANSLATIONS[extId];
+  if (!spec) return { ok: false, localized: 0, total: 0 };
+  try {
+    const pkg = JSON.parse(pkgContent);
+    if (!pkg || !pkg.contributes) return { ok: false, localized: 0, total: 0 };
+    let total = 0;
+    let localized = 0;
+
+    if (Array.isArray(pkg.contributes.commands)) {
+      for (const cmd of pkg.contributes.commands) {
+        const zh = spec.commandsById && spec.commandsById[cmd.command];
+        if (zh) {
+          total++;
+          if (cmd.title === zh) localized++;
+        }
+      }
+    }
+    if (spec.submenusById && Array.isArray(pkg.contributes.submenus)) {
+      for (const sm of pkg.contributes.submenus) {
+        const zh = spec.submenusById[sm.id];
+        if (zh) {
+          total++;
+          if (sm.label === zh) localized++;
+        }
+      }
+    }
+    if (spec.customEditorsByViewType && Array.isArray(pkg.contributes.customEditors)) {
+      for (const ed of pkg.contributes.customEditors) {
+        const zh = spec.customEditorsByViewType[ed.viewType];
+        if (zh) {
+          total++;
+          if (ed.displayName === zh) localized++;
+        }
+      }
+    }
+    if (spec.viewsById && pkg.contributes.views && typeof pkg.contributes.views === 'object') {
+      for (const list of Object.values(pkg.contributes.views)) {
+        if (!Array.isArray(list)) continue;
+        for (const v of list) {
+          const zh = spec.viewsById[v.id];
+          if (zh) {
+            total++;
+            if (v.name === zh) localized++;
+          }
+        }
+      }
+    }
+    if (spec.settingsByKey) {
+      for (const props of getConfigPropGroups(pkg)) {
+        for (const [key, patchFields] of Object.entries(spec.settingsByKey)) {
+          const prop = props[key];
+          if (!prop || typeof prop !== 'object') continue;
+          for (const field of ['description', 'markdownDeprecationMessage', 'deprecationMessage']) {
+            if (patchFields[field] && typeof prop[field] === 'string') {
+              total++;
+              if (prop[field] === patchFields[field]) localized++;
+            }
+          }
+        }
+      }
+    }
+
+    return { ok: total > 0 && localized === total, localized, total };
   } catch (_e) {
-    return false;
+    return { ok: false, localized: 0, total: 0 };
   }
 }
 
+function isAgyPackageLocalized(pkgContent) {
+  return inspectExtensionPackageLocalization('agy', pkgContent).ok;
+}
+
 function isAgyPackageHasAnyLocalized(pkgContent) {
-  try {
-    const pkg = JSON.parse(pkgContent);
-    if (!pkg.contributes || !Array.isArray(pkg.contributes.commands)) return false;
-    for (const cmd of pkg.contributes.commands) {
-      if (agyCommandsMap[cmd.command] && cmd.title === agyCommandsMap[cmd.command]) {
-        return true;
-      }
-    }
-    return false;
-  } catch (_e) {
-    return false;
+  return inspectExtensionPackageLocalization('agy', pkgContent).localized > 0;
+}
+
+function isExtensionPackageHasAnyLocalized(extId, pkgContent) {
+  return inspectExtensionPackageLocalization(extId, pkgContent).localized > 0;
+}
+
+function checkAllBuiltInExtensionsLocalized(appDir) {
+  const results = [];
+  for (const extId of Object.keys(EXTENSION_MANIFEST_TRANSLATIONS)) {
+    const pkgPath = path.join(appDir, 'extensions', extId, 'package.json');
+    if (!fs.existsSync(pkgPath)) continue;
+    const status = inspectExtensionPackageLocalization(extId, fs.readFileSync(pkgPath, 'utf8'));
+    results.push({ extId, pkgPath, ...status });
   }
+  const allOk = results.length > 0 && results.every(r => r.ok);
+  const totalItems = results.reduce((s, r) => s + r.total, 0);
+  const localizedItems = results.reduce((s, r) => s + r.localized, 0);
+  return { ok: allOk, results, totalItems, localizedItems };
+}
+
+function checkBrowserOnboardingLocalized(appDir) {
+  const staticDir = path.join(appDir, 'out', 'vs', 'platform', 'browserOnboarding', 'static');
+  const results = [];
+  for (const [fileName, marker] of Object.entries(BROWSER_ONBOARDING_MARKERS)) {
+    const fullPath = path.join(staticDir, fileName);
+    if (!fs.existsSync(fullPath)) continue;
+    const content = fs.readFileSync(fullPath, 'utf8');
+    results.push({ fileName, fullPath, ok: content.includes(marker) });
+  }
+  return {
+    ok: results.length > 0 && results.every(r => r.ok),
+    results
+  };
+}
+
+/**
+ * 组合计算构建引擎与共享 UI 词库/清洗器源码指纹（任何一处变更都会触发热/冷重编）
+ */
+function computeBuildEngineFingerprint(patchDir) {
+  const files = [
+    path.join(patchDir, 'build_ultimate_chinese_engine.js'),
+    path.join(patchDir, 'src', 'ui_dictionary.js'),
+    path.join(patchDir, 'src', 'dom_cleaner.js')
+  ];
+  const hash = crypto.createHash('sha256');
+  for (const fp of files) {
+    hash.update(path.basename(fp));
+    hash.update('\0');
+    if (fs.existsSync(fp)) {
+      hash.update(fs.readFileSync(fp));
+    }
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 function isWorkbenchPatched(content) {
@@ -549,13 +781,15 @@ function isJetskiPatched(content) {
     content.includes('已思考 ${Math.max(1,') &&
     content.includes('思考了 ${Math.max(1,Number(') &&
     content.includes('children:"正在思考..."');
-  return hasUen && hasSma && hasThoughts;
+  const hasDomCleaner = content.includes(DOM_CLEANER_V2_MARKER) && content.includes('window.__agyDomCleanerV2');
+  return hasUen && hasSma && hasThoughts && hasDomCleaner;
 }
 
 function isJetskiHasAnyPatch(content) {
   if (typeof content !== 'string') return false;
   return (
     content.includes(WORKBENCH_PATCHED_MARKER) ||
+    content.includes(DOM_CLEANER_V2_MARKER) ||
     content.includes('已思考 ${Math.max(1,') ||
     content.includes('children:"正在思考..."')
   );
@@ -885,6 +1119,20 @@ function patchJetskiContent(jkCode) {
     changed = true;
   }
 
+  // 挂载共享全量 DOM 清洗引擎 v2（实现独立 Agent Manager 窗口全界面汉化，且不破坏末尾 sourceMappingURL）
+  let domCleanerAttached = false;
+  if (!code.includes(DOM_CLEANER_V2_MARKER)) {
+    const cleanerBlock = '\n;' + buildDomCleanerRuntimeScript() + '\n';
+    const smIdx = code.lastIndexOf('//# sourceMappingURL=');
+    if (smIdx !== -1) {
+      code = code.slice(0, smIdx) + cleanerBlock + code.slice(smIdx);
+    } else {
+      code = code + cleanerBlock;
+    }
+    domCleanerAttached = true;
+    changed = true;
+  }
+
   return {
     ok: changed || isJetskiPatched(code),
     changed,
@@ -892,6 +1140,7 @@ function patchJetskiContent(jkCode) {
     uenHit,
     smaHit,
     thoughtHits,
+    domCleanerAttached,
     code
   };
 }
@@ -971,8 +1220,11 @@ function applyAllPatches(options = {}) {
   }
 
   // 2. 跨版本安全备份关键文件（若检测到官方新版覆盖，自动刷新 .bak）
-  const extBackupInfo = ensureFreshBackup(extJsPath, c => c.includes(EXTENSION_HOOK_MARKER), logger);
-  ensureFreshBackup(agyExtPackagePath, isAgyPackageHasAnyLocalized, logger);
+  const extBackupInfo = ensureFreshBackup(
+    extJsPath,
+    c => c.includes(EXTENSION_HOOK_MARKER) || c.includes(EXTENSION_RUNTIME_MSG_MARKER),
+    logger
+  );
   const wbBackupInfo = ensureFreshBackup(wbPath, isWorkbenchPatched, logger);
   const jkBackupInfo = ensureFreshBackup(jkPath, isJetskiHasAnyPatch, logger);
 
@@ -985,33 +1237,65 @@ function applyAllPatches(options = {}) {
     }
   }
 
-  // 3. 汉化 agy package.json
-  if (fs.existsSync(agyExtPackagePath)) {
+  // 3. 全面汉化 5 个官方内置扩展的 package.json（含命令、自定义编辑器、子菜单、视图及设置描述）
+  let localizedExtCount = 0;
+  let totalExtFieldHits = 0;
+  for (const extId of Object.keys(EXTENSION_MANIFEST_TRANSLATIONS)) {
+    const pkgPath = path.join(appDir, 'extensions', extId, 'package.json');
+    if (!fs.existsSync(pkgPath)) continue;
     try {
-      const sourcePkgPath = fs.existsSync(agyExtPackagePath + '.bak') ? agyExtPackagePath + '.bak' : agyExtPackagePath;
-      const rawPkg = fs.readFileSync(sourcePkgPath, 'utf8');
-      const pkg = JSON.parse(rawPkg);
-      let pkgModified = false;
-
-      if (pkg.contributes && Array.isArray(pkg.contributes.commands)) {
-        for (const cmd of pkg.contributes.commands) {
-          if (agyCommandsMap[cmd.command] && cmd.title !== agyCommandsMap[cmd.command]) {
-            cmd.title = agyCommandsMap[cmd.command];
-            pkgModified = true;
-          }
-        }
-      }
-      if (pkgModified) {
+      ensureFreshBackup(pkgPath, c => isExtensionPackageHasAnyLocalized(extId, c), logger);
+      const sourcePkgPath = fs.existsSync(pkgPath + '.bak') ? pkgPath + '.bak' : pkgPath;
+      const pkg = JSON.parse(fs.readFileSync(sourcePkgPath, 'utf8'));
+      const res = localizeExtensionPackageObject(extId, pkg);
+      if (res.modified) {
         const nextStr = JSON.stringify(pkg, null, 2);
-        const curStr = fs.readFileSync(agyExtPackagePath, 'utf8');
+        const curStr = fs.readFileSync(pkgPath, 'utf8');
         if (curStr !== nextStr) {
-          fs.writeFileSync(agyExtPackagePath, nextStr, 'utf8');
-          logger('✔ [扩展] agy 扩展命令配置汉化完成');
+          fs.writeFileSync(pkgPath, nextStr, 'utf8');
         }
+        localizedExtCount++;
+        totalExtFieldHits += res.applied;
       }
     } catch (e) {
-      logger(`⚠ agy package.json 处理跳过: ${e.message}`);
+      logger(`⚠ 扩展 ${extId}/package.json 处理跳过: ${e.message}`);
     }
+  }
+  if (localizedExtCount > 0) {
+    logger(`✔ [扩展清单] 已全量汉化 ${localizedExtCount} 个官方内置扩展清单 (共 ${totalExtFieldHits} 项命令/视图/设置描述)`);
+  }
+
+  // 3.5 汉化内置浏览器静态引导页（browserLanding.html / browserOnboarding.html）
+  const browserStaticDir = path.join(appDir, 'out', 'vs', 'platform', 'browserOnboarding', 'static');
+  let onboardingLocalized = 0;
+  for (const [fileName, pairs] of Object.entries(BROWSER_ONBOARDING_TRANSLATIONS)) {
+    const htmlPath = path.join(browserStaticDir, fileName);
+    if (!fs.existsSync(htmlPath)) continue;
+    try {
+      const marker = BROWSER_ONBOARDING_MARKERS[fileName];
+      ensureFreshBackup(htmlPath, c => c.includes(marker), logger);
+      const srcHtmlPath = fs.existsSync(htmlPath + '.bak') ? htmlPath + '.bak' : htmlPath;
+      let html = fs.readFileSync(srcHtmlPath, 'utf8');
+      let hits = 0;
+      for (const [fromStr, toStr] of pairs) {
+        if (html.includes(fromStr)) {
+          html = html.replace(fromStr, toStr);
+          hits++;
+        }
+      }
+      if (hits > 0) {
+        const curHtml = fs.readFileSync(htmlPath, 'utf8');
+        if (curHtml !== html) {
+          fs.writeFileSync(htmlPath, html, 'utf8');
+        }
+        onboardingLocalized++;
+      }
+    } catch (e) {
+      logger(`⚠ 浏览器引导页 ${fileName} 处理跳过: ${e.message}`);
+    }
+  }
+  if (onboardingLocalized > 0) {
+    logger(`✔ [浏览器引导] 已汉化内置浏览器欢迎页与引导页 (${onboardingLocalized} 个静态页)`);
   }
 
   // 4. 调用唯一权威构建脚本编译并部署 hub_main_zh.js（内置抗混淆动态定位 + 分级韧性模块容错 + 语法预检）
@@ -1040,15 +1324,19 @@ function applyAllPatches(options = {}) {
     }
   }
 
-  // 6. 抗混淆注入 extension.js Webview 代理重定向钩子（自动兼容 Jv/Zw 等任意混淆名）
+  // 6. 抗混淆注入 extension.js Webview 代理重定向钩子并汉化原生提示弹窗（基于纯净原件重建防止脏叠加）
   if (fs.existsSync(extJsPath)) {
-    const extContent = fs.readFileSync(extJsPath, 'utf8');
+    const extSrcPath = fs.existsSync(extJsPath + '.bak') ? extJsPath + '.bak' : extJsPath;
+    const extContent = fs.readFileSync(extSrcPath, 'utf8');
     const hookRes = injectExtensionWebviewHook(extContent);
-    if (hookRes.ok && hookRes.changed) {
-      fs.writeFileSync(extJsPath, hookRes.code, 'utf8');
-      logger(`✔ [扩展] 已通过抗混淆定位器注入 Webview 代理重定向钩子 (URL 参数: ${hookRes.urlArg}, 偏移: ${hookRes.offset})`);
-    } else if (hookRes.ok && hookRes.alreadyHooked) {
-      logger('✔ [扩展] Webview 代理钩子已存在，无需重复注入');
+    if (hookRes.ok) {
+      const curExt = fs.readFileSync(extJsPath, 'utf8');
+      if (curExt !== hookRes.code) {
+        fs.writeFileSync(extJsPath, hookRes.code, 'utf8');
+        logger(`✔ [扩展] extension.js 注入与弹窗汉化完成 (代理钩子=${hookRes.hookAdded ? `新注入:${hookRes.urlArg}` : '就绪'}, 原生弹窗汉化=${hookRes.runtimeMsgHits} 处)`);
+      } else {
+        logger(`✔ [扩展] extension.js Webview 代理钩子与原生弹窗汉化已就绪`);
+      }
     } else {
       throw new Error(`未能在 extension.js 中定位 renderWebviewHtml 注入锚点: ${hookRes.reason}`);
     }
@@ -1080,8 +1368,9 @@ function applyAllPatches(options = {}) {
       if (jkRes.uenHit) logger('✔ [会话标题] 已拦截 jetskiAgent 列表渲染入口');
       if (jkRes.smaHit) logger('✔ [会话标题] 已拦截 jetskiAgent 搜索项渲染入口');
       if (jkRes.thoughtHits > 0) logger(`✔ [思维链标签] 已汉化 jetskiAgent 思考标签 (${jkRes.thoughtHits} 处)`);
+      if (jkRes.domCleanerAttached) logger('✔ [全界面汉化] 已为 jetskiAgent 独立窗口挂载共享 DOM 清洗引擎 v2');
     } else if (jkRes.ok) {
-      logger('✔ [jetskiAgent] 标题与思考标签注入已就绪');
+      logger('✔ [jetskiAgent] 标题、思考标签与全界面 DOM 清洗引擎 v2 已就绪');
     } else {
       logger('⚠ [jetskiAgent] 未定位到外围注入锚点（跳过，不影响主窗口运行）');
     }
@@ -1128,7 +1417,7 @@ function applyAllPatches(options = {}) {
     ideVersion: identity.ideVersion,
     agyVersion: identity.agyVersion,
     hubSourceSha256: computeFileSha256(hubSourcePath),
-    buildEngineSha256: computeFileSha256(ultimateBuildScript),
+    buildEngineSha256: computeBuildEngineFingerprint(patchDir),
     nodeExecPath,
     moduleStatus: buildReport ? buildReport.modules : undefined,
     skippedModules: buildReport ? buildReport.skippedModules : [],
@@ -1149,8 +1438,12 @@ module.exports = {
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
   HUB_ZH_TABLE_FEATURE_MARKERS,
+  HUB_ZH_FULL_UI_MARKERS,
   EXTENSION_HOOK_MARKER,
   EXTENSION_HOOK_REGEX,
+  EXTENSION_RUNTIME_MSG_MARKER,
+  BROWSER_ONBOARDING_MARKERS,
+  DOM_CLEANER_V2_MARKER,
   WORKBENCH_TITLE_FN_REGEX,
   WORKBENCH_PATCHED_MARKER,
   JETSKI_TITLE_FN_REGEX,
@@ -1167,7 +1460,12 @@ module.exports = {
   locateTitleRpcModule,
   locateThoughtModule,
   locateTableModule,
+  localizeExtensionPackageObject,
+  inspectExtensionPackageLocalization,
   isAgyPackageLocalized,
+  checkAllBuiltInExtensionsLocalized,
+  checkBrowserOnboardingLocalized,
+  computeBuildEngineFingerprint,
   isWorkbenchPatched,
   isJetskiPatched,
   filesAreIdentical,

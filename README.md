@@ -6,9 +6,10 @@
 
 ## 一、深度全量汉化能力
 
-### 1. 全界面与设置中心深度中文化（零副作用展示层拦截）
-- **Hub 前端核心（`hub_main_zh.js`）**：通过 `sT`、`uT`、`yT`、`xT`、`vT` 展示层拦截加全局运行时 DOM 清洗双层防线，全量覆盖 14 个设置屏幕、48+ 分区面板、主对话输入框、会话右键菜单、Token 用量明细及各类操作按钮；严格保留原始路由 Key，绝不引发页面空白或配置失效。
-- **外层工作台与扩展层**：联动汉化 `extensions/agy/package.json` 扩展命令标题、`out/vs/workbench/workbench.desktop.main.js`（`yhn`）与 `out/jetskiAgent/main.js`（`est` / `uEn` / `sMa` 及思考耗时标签）。
+### 1. 全界面四阵地深度中文化（共享全量词库 + 防误杀 DOM 清洗引擎 v2）
+- **Hub 前端核心（`hub_main_zh.js`）**：通过 `sT`/`uT`/`yT`/`xT`/`vT` 展示层抗混淆拦截 + 右侧边栏概览抽屉与新建标签搜索页首帧直译 + 共享运行时 DOM 清洗引擎 v2（内置 9 大功能域全量词库、24 类动态模板正则及 `placeholder`/`title`/`aria-label` 属性变更监听，覆盖服务端动态下发的 `已用技能 (Skills Used)` 分区），严格通过四重作用域黑/白名单隔离代码、编辑器、终端、Diff 源码与 AI 正文，绝不误杀用户内容。
+- **独立 Agent Manager 窗口（`out/jetskiAgent/main.js`）**：联动注入会话标题枢纽、思考耗时标签与共享全界面 DOM 清洗引擎 v2，实现独立窗口同步全面中文化。
+- **5 大官方内置扩展与引导页**：全量汉化 `agy`、`antigravity-code-executor`、`antigravity-dev-containers`、`antigravity-remote-openssh`、`antigravity-remote-wsl` 的扩展命令、视图、自定义编辑器及设置描述，同步汉化 `extension.js` 原生弹窗提示、`out/vs/workbench/workbench.desktop.main.js` 会话标题枢纽以及内置浏览器引导页（`browserLanding.html` / `browserOnboarding.html`）。
 - **Markdown 表格菜单汉化**：同步汉化对话表格右上角操作菜单与提示（`表格选项`、`复制为 Markdown`、`展开全宽`、`适应窗口`、`已复制到剪贴板`、`可横向滚动表格`）。
 
 ### 2. 会话标题（Conversations）实时翻译与原生 RPC 持久化
@@ -73,8 +74,9 @@ cd antigravity-ide-zh-cn
 # 1. 执行全量汉化、使用体验优化、校验和同步与代理/翻译微服务部署
 npm run patch
 
-# 2. 运行自动化生效检验（综合 / 14 屏幕 / 会话标题 / 思维链翻译与交互 / Markdown 表格自适应）
+# 2. 运行自动化生效检验（综合 / 全界面防误杀 / 14 屏幕 / 会话标题 / 思维链 / Markdown 表格）
 npm run verify
+npm run verify:ui
 npm run verify:screens
 npm run verify:titles
 npm run verify:thoughts
@@ -95,7 +97,8 @@ npm run restore
 | 类别 | 界面 / 能力区域 | 原始状态 (Before) | 汉化与优化后效果 (After) | 检验状态 |
 | :--- | :--- | :--- | :--- | :--- |
 | **汉化** | 侧边栏与设置主面板 | `Settings` / `General` / `Appearance` / `Models` 等 14 屏英文 | 全中文导航、标题、描述、权限卡片与选项下拉（保留原始路由 Key） | ✅ 通过 |
-| **汉化** | 主对话输入框与右键菜单 | `Ask anything, @ to mention` / `Rename` / `Pin` / `Archive` / `Split` | `向 Antigravity 提问，输入 @ 提及` / `重命名` / `固定会话` / `归档会话` / `拆分视图` | ✅ 通过 |
+| **汉化** | 右侧边栏与 9 大功能区 | `Search tabs, files and more` / `Customize Sections` / `Skills Used` / `Modified Files` / `Side Question` / `See all` 等英文界面 | 全中文右侧概览抽屉、服务端动态分区、工具/终端/Diff/Swarm/浏览器/插件市场/自动化全覆盖（四重防误杀隔离正文与代码） | ✅ 通过 |
+| **汉化** | 5 大内置扩展与引导页 | 命令面板、扩展设置描述、SSH/WSL/容器命令、原生弹窗与浏览器引导页纯英文 | 5 个官方内置扩展清单、10 处原生弹窗、`jetskiAgent` 独立窗口与浏览器引导页全量中文化 | ✅ 通过 |
 | **汉化** | 会话历史标题 | 云端生成英文对话标题 | 1~2 秒自动中文化并通过原生 RPC 持久化写入本地数据库 | ✅ 通过 |
 | **汉化** | 思维链头部与正文 | `Thought for Xs` + 英文思维摘要 | `思考了 X 秒` + 实时流式中文译文（代码/路径/波浪号无损隔离） | ✅ 通过 |
 | **优化** | 思维链点击与悬停交互 | 思考完秒收起、后续步骤推高滚动打断阅读、无法锁定展开 | 悬停防打断锁定 + 右上角小锁常驻展开 + 一键原文/译文切换 + 离区 350ms 自动收起 | ✅ 通过 |

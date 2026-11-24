@@ -9,6 +9,7 @@ function runRestore() {
 
   const {
     installDir,
+    appDir,
     productJsonPath,
     agyExtPackagePath,
     checksumTargets
@@ -18,6 +19,7 @@ function runRestore() {
   const workbenchTarget = checksumTargets.find((t) => t.id === 'vs/workbench/workbench.desktop.main.js')?.path;
   const jetskiTarget = checksumTargets.find((t) => t.id === 'jetskiAgent/main.js')?.path;
   const agyExtDir = path.join(installDir, 'resources', 'app', 'extensions', 'agy');
+  const browserStaticDir = path.join(appDir, 'out', 'vs', 'platform', 'browserOnboarding', 'static');
 
   const filesToRestore = [
     productJsonPath,
@@ -25,6 +27,12 @@ function runRestore() {
     jetskiTarget,
     outMainTarget,
     agyExtPackagePath,
+    path.join(appDir, 'extensions', 'antigravity-code-executor', 'package.json'),
+    path.join(appDir, 'extensions', 'antigravity-dev-containers', 'package.json'),
+    path.join(appDir, 'extensions', 'antigravity-remote-openssh', 'package.json'),
+    path.join(appDir, 'extensions', 'antigravity-remote-wsl', 'package.json'),
+    path.join(browserStaticDir, 'browserLanding.html'),
+    path.join(browserStaticDir, 'browserOnboarding.html'),
     path.join(agyExtDir, 'vscode', 'extension.js')
   ].filter(Boolean);
 

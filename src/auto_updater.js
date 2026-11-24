@@ -32,7 +32,9 @@ const {
   HUB_ZH_THOUGHT_FEATURE_MARKERS,
   HUB_ZH_TITLE_FEATURE_MARKERS,
   HUB_ZH_TABLE_FEATURE_MARKERS,
+  HUB_ZH_FULL_UI_MARKERS,
   EXTENSION_HOOK_MARKER,
+  EXTENSION_RUNTIME_MSG_MARKER,
   WORKBENCH_TITLE_FN_REGEX,
   JETSKI_TITLE_FN_REGEX,
   JETSKI_UEN_REGEX,
@@ -45,7 +47,9 @@ const {
   locateTitleRpcModule,
   locateThoughtModule,
   locateTableModule,
-  isAgyPackageLocalized,
+  checkAllBuiltInExtensionsLocalized,
+  checkBrowserOnboardingLocalized,
+  computeBuildEngineFingerprint,
   isWorkbenchPatched,
   isJetskiPatched,
   filesAreIdentical,
@@ -172,27 +176,41 @@ function inspectHealthDeeply() {
     details: {}
   };
 
-  // 1. 检查扩展 extension.js 与 agy/package.json
+  // 1. 检查扩展 extension.js（代理钩子 + 原生弹窗）与全部 5 个内置扩展 package.json 及浏览器引导页
   if (fs.existsSync(EXT_JS)) {
     const stat = fs.statSync(EXT_JS);
     const content = fs.readFileSync(EXT_JS, 'utf8');
     const hasProxyHook = content.includes(EXTENSION_HOOK_MARKER) && content.includes('hub_proxy');
-    const pkgLocalized = fs.existsSync(EXT_PACKAGE_JSON) && isAgyPackageLocalized(fs.readFileSync(EXT_PACKAGE_JSON, 'utf8'));
+    const hasRuntimeMsgs = content.includes(EXTENSION_RUNTIME_MSG_MARKER);
+    const extPkgReport = checkAllBuiltInExtensionsLocalized(RESOURCES_APP);
+    const onboardingReport = checkBrowserOnboardingLocalized(RESOURCES_APP);
     report.details.extension = {
       path: EXT_JS,
       size: formatBytes(stat.size),
       mtime: stat.mtime.toLocaleString('zh-CN', { hour12: false }),
-      hookStatus: hasProxyHook ? '已挂载 (正常)' : '未挂载 (缺失)',
-      pkgStatus: pkgLocalized ? '命令已汉化' : '命令未汉化',
-      ok: hasProxyHook && pkgLocalized
+      hookStatus: hasProxyHook ? (hasRuntimeMsgs ? '已挂载 + 弹窗汉化' : '已挂载 (弹窗待补齐)') : '未挂载 (缺失)',
+      pkgStatus: extPkgReport.ok
+        ? `5 扩展全量已汉化 (${extPkgReport.localizedItems}/${extPkgReport.totalItems})`
+        : `待补齐 (${extPkgReport.localizedItems}/${extPkgReport.totalItems})`,
+      onboardingStatus: onboardingReport.ok ? '浏览器引导页已汉化' : '浏览器引导页未汉化',
+      ok: hasProxyHook && hasRuntimeMsgs && extPkgReport.ok && onboardingReport.ok
     };
     if (!hasProxyHook) {
       report.valid = false;
       report.failures.push('extension.js 缺少 Webview 代理重定向钩子（官方更新已覆盖此文件）');
     }
-    if (!pkgLocalized) {
+    if (!hasRuntimeMsgs) {
       report.valid = false;
-      report.failures.push('extensions/agy/package.json 扩展命令汉化缺失或被官方更新覆盖');
+      report.failures.push('extension.js 原生提示弹窗尚未汉化或已被官方更新覆盖');
+    }
+    if (!extPkgReport.ok) {
+      const badExts = extPkgReport.results.filter(r => !r.ok).map(r => `${r.extId}(${r.localized}/${r.total})`);
+      report.valid = false;
+      report.failures.push(`官方内置扩展清单汉化不完整或被官方更新覆盖: ${badExts.join(', ')}`);
+    }
+    if (!onboardingReport.ok) {
+      report.valid = false;
+      report.failures.push('内置浏览器引导静态页 (browserLanding/browserOnboarding) 尚未汉化或被覆盖');
     }
   } else {
     report.valid = false;
@@ -278,7 +296,8 @@ function inspectHealthDeeply() {
     const hasUt = content.includes('_titles =') && content.includes('通用设置');
     const hasYt = content.includes('_secTitles =') && content.includes('自定义扩展与技能');
     const hasXt = content.includes('_labels =') && content.includes('权限预设模板');
-    const hasDomCleaner = content.includes('Antigravity 全局自适应运行时 DOM 清洗引擎');
+    const missingFullUiMarkers = HUB_ZH_FULL_UI_MARKERS.filter(m => !content.includes(m));
+    const hasDomCleaner = missingFullUiMarkers.length === 0;
 
     // 若某增强模块在新版本中已记录为“受控降级跳过”，则不因该模块缺失触发无限重编译循环
     const titleExpected = !modStat || !modStat.titleRpc || modStat.titleRpc.enabled !== false;
@@ -291,10 +310,10 @@ function inspectHealthDeeply() {
     const missingTableFeatures = tableExpected ? HUB_ZH_TABLE_FEATURE_MARKERS.filter(m => !content.includes(m)) : [];
     const hasTableEngine = missingTableFeatures.length === 0;
 
-    // 4 维版本漂移检测（IDE 版本 + agy 扩展版本 + VS Code 基座 + Distro + 源资产/构建引擎哈希）
+    // 4 维版本漂移检测（IDE 版本 + agy 扩展版本 + VS Code 基座 + Distro + 源资产/构建引擎及词库组合哈希）
     const hubSourcePath = resolveHubSourcePath(EXT_DIR, PATCH_DIR);
     const hubSourceSha = computeFileSha256(hubSourcePath);
-    const buildEngineSha = computeFileSha256(BUILD_ENGINE_JS);
+    const buildEngineSha = computeBuildEngineFingerprint(PATCH_DIR);
     const curId = readInstalledAppIdentity(RESOURCES_APP);
     const appIdentityDrifted = Boolean(
       meta &&
@@ -330,7 +349,7 @@ function inspectHealthDeeply() {
         XB_会话标题枢纽: !titleExpected ? '⚠ 已降级跳过' : hasTitleEngine ? '✔ 拦截与实时持久化就绪' : '❌ 缺失/版本过旧',
         iAc_思维链流式翻译: !thoughtExpected ? '⚠ 已降级跳过' : hasThoughtEngine ? '✔ 直出门控/悬停防打断/小锁全就绪' : `❌ 缺失 (${missingThoughtFeatures.slice(0, 3).join(', ')})`,
         lkc_表格自适应布局: !tableExpected ? '⚠ 已降级跳过' : hasTableEngine ? '✔ 智能权重列宽/防遮挡/菜单汉化就绪' : `❌ 缺失 (${missingTableFeatures.slice(0, 3).join(', ')})`,
-        DOM_运行时清洗器: hasDomCleaner ? '✔ 挂载正常' : '❌ 缺失'
+        DOM_运行时清洗器: hasDomCleaner ? '✔ v2 全界面防误杀与右侧边栏直译就绪' : `❌ 缺失 (${missingFullUiMarkers.slice(0, 3).join(', ')})`
       },
       driftStatus: appIdentityDrifted
         ? `检测到客户端升级 (${formatAppIdentity(meta)} -> ${formatAppIdentity(curId)})`
@@ -363,7 +382,7 @@ function inspectHealthDeeply() {
       report.failures.push('检测到 hub_main.js 源资产发生变更（与已编译 hub_main_zh.js 基准哈希不一致，需自动重编）');
     } else if (buildEngineDrifted) {
       report.valid = false;
-      report.failures.push('检测到本地 build_ultimate_chinese_engine.js 已更新（需重新编译部署 hub_main_zh.js）');
+      report.failures.push('检测到本地构建引擎或共享全量 UI 词库已更新（需重新编译部署 hub_main_zh.js）');
     } else if (hubMetaMissingHash) {
       report.valid = false;
       report.failures.push('部署元数据缺少 4 维版本身份或源资产基准指纹（需自愈对齐一次）');
@@ -381,7 +400,7 @@ function inspectHealthDeeply() {
   const jkOk = jkExists && isJetskiPatched(fs.readFileSync(JETSKI_JS, 'utf8'));
   report.details.outerBundles = {
     workbench: wbExists ? (wbOk ? '✔ 标题枢纽已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
-    jetskiAgent: jkExists ? (jkOk ? '✔ 标题与思考标签已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
+    jetskiAgent: jkExists ? (jkOk ? '✔ 标题、思考标签与全界面 DOM 清洗 v2 已注入' : '❌ 未注入/被官方覆盖') : '❌ 文件不存在',
     ok: wbOk && jkOk
   };
   if (wbExists && !wbOk) {
@@ -776,9 +795,9 @@ function main() {
   const health = inspectHealthDeeply();
 
   if (health.details.extension && health.details.extension.ok) {
-    appendLog(`  ✔ 核心扩展 (extension.js)   : 正常 [大小: ${health.details.extension.size}, 钩子: ${health.details.extension.hookStatus}, 扩展命令: ${health.details.extension.pkgStatus}]`);
+    appendLog(`  ✔ 核心扩展与内置引导页      : 正常 [大小: ${health.details.extension.size}, extension.js: ${health.details.extension.hookStatus}, 清单: ${health.details.extension.pkgStatus}, ${health.details.extension.onboardingStatus}]`);
   } else {
-    appendLog(`  ❌ 核心扩展 (extension.js)   : 异常 [${health.details.extension?.error || `${health.details.extension?.hookStatus} / ${health.details.extension?.pkgStatus}`}]`);
+    appendLog(`  ❌ 核心扩展与内置引导页      : 异常 [${health.details.extension?.error || `${health.details.extension?.hookStatus} / ${health.details.extension?.pkgStatus} / ${health.details.extension?.onboardingStatus}`}]`);
   }
 
   if (health.details.proxy && health.details.proxy.ok) {
